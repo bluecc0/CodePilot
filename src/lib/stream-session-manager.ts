@@ -110,6 +110,8 @@ export interface StartStreamParams {
    *  codepilot:file-changed event, so the PreviewPanel listener (which
    *  carries absolute filePaths) can match against them. */
   workingDirectory?: string | null;
+  /** Character persona bound to this single-character session. */
+  assistantId?: string;
 }
 
 // ==========================================
@@ -503,6 +505,7 @@ async function runStream(stream: ActiveStream, params: StartStreamParams): Promi
         ...(params.selectedSkills && params.selectedSkills.length > 0
           ? { selectedSkills: params.selectedSkills }
           : {}),
+        ...(params.assistantId ? { assistant_id: params.assistantId } : {}),
       }),
       signal: stream.abortController.signal,
     });

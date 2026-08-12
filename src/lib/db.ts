@@ -63,7 +63,7 @@ const RUNTIME_OWNER_LOCK_PATH = `${DB_PATH}.runtime-owner.lock`;
 // replacing this module. Keep a code-owned revision beside that handle so a
 // newly loaded migration still runs without requiring the user to restart the
 // desktop client. Bump this value whenever initDb/migrateDb gains a migration.
-const DATABASE_SCHEMA_REVISION = '2026-08-06-provider-secret-envelope-v1';
+const DATABASE_SCHEMA_REVISION = '2026-08-12-ephemeral-privacy-chat-v1';
 const LEGACY_NOTIFICATION_BACKLOG_MARKER = 'notification_delivery_legacy_backlog_v1';
 const LEGACY_NOTIFICATION_BACKLOG_MAX_AGE_MS = 60 * 60 * 1000;
 
@@ -493,8 +493,118 @@ function safeAddColumn(db: Database.Database, sql: string): void {
   }
 }
 
+/**
+ * Additive multi-character/group-chat schema. The same idempotent function is
+ * used for fresh databases, legacy upgrades, and dev HMR revision refreshes.
+ */
+export function migrateCharacterGroupSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS assistant_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      avatar_path TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      personality TEXT NOT NULL DEFAULT '',
+      scenario TEXT NOT NULL DEFAULT '',
+      first_message TEXT NOT NULL DEFAULT '',
+      message_examples TEXT NOT NULL DEFAULT '',
+      system_prompt TEXT NOT NULL DEFAULT '',
+      post_history_instructions TEXT NOT NULL DEFAULT '',
+      alternate_greetings_json TEXT NOT NULL DEFAULT '[]',
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      creator TEXT NOT NULL DEFAULT '',
+      character_version TEXT NOT NULL DEFAULT '',
+      source_spec TEXT NOT NULL DEFAULT 'manual'
+        CHECK(source_spec IN ('v1', 'v2', 'v3', 'manual')),
+      source_metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS assistant_groups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      avatar_path TEXT NOT NULL DEFAULT '',
+      activation_strategy TEXT NOT NULL DEFAULT 'list'
+        CHECK(activation_strategy IN ('list', 'manual', 'natural', 'pooled')),
+      generation_mode TEXT NOT NULL DEFAULT 'sequential'
+        CHECK(generation_mode IN ('sequential')),
+      allow_self_responses INTEGER NOT NULL DEFAULT 0 CHECK(allow_self_responses IN (0, 1)),
+      collaboration_contract_json TEXT NOT NULL DEFAULT '{}',
+      deleted_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS assistant_group_members (
+      group_id TEXT NOT NULL,
+      assistant_id TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+      talkativeness REAL NOT NULL DEFAULT 0.5 CHECK(talkativeness >= 0 AND talkativeness <= 1),
+      role_label TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (group_id, assistant_id),
+      FOREIGN KEY (group_id) REFERENCES assistant_groups(id) ON DELETE CASCADE,
+      FOREIGN KEY (assistant_id) REFERENCES assistant_profiles(id) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS group_runs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      group_id TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'list'
+        CHECK(mode IN ('list', 'manual', 'natural', 'pooled')),
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'running', 'completed', 'partial', 'failed', 'cancelled')),
+      speaker_queue_json TEXT NOT NULL DEFAULT '[]',
+      next_index INTEGER NOT NULL DEFAULT 0 CHECK(next_index >= 0),
+      user_message_id TEXT,
+      objective TEXT NOT NULL DEFAULT '',
+      contract_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (group_id) REFERENCES assistant_groups(id) ON DELETE RESTRICT,
+      FOREIGN KEY (user_message_id) REFERENCES messages(id) ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_assistant_profiles_updated ON assistant_profiles(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_assistant_group_members_order ON assistant_group_members(group_id, sort_order);
+    CREATE INDEX IF NOT EXISTS idx_group_runs_session_created ON group_runs(session_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_group_runs_status ON group_runs(status, updated_at DESC);
+  `);
+
+  const groupColumns = new Set(
+    (db.prepare('PRAGMA table_info(assistant_groups)').all() as { name: string }[]).map(column => column.name),
+  );
+  if (!groupColumns.has('deleted_at')) {
+    safeAddColumn(db, 'ALTER TABLE assistant_groups ADD COLUMN deleted_at TEXT');
+  }
+
+  const sessionColumns = new Set(
+    (db.prepare('PRAGMA table_info(chat_sessions)').all() as { name: string }[]).map(column => column.name),
+  );
+  if (!sessionColumns.has('conversation_kind')) {
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN conversation_kind TEXT NOT NULL DEFAULT 'single'");
+  }
+  if (!sessionColumns.has('assistant_id')) {
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN assistant_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (!sessionColumns.has('group_id')) {
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN group_id TEXT NOT NULL DEFAULT ''");
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_sessions_assistant_id ON chat_sessions(assistant_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_group_id ON chat_sessions(group_id);
+  `);
+}
+
 function migrateDb(db: Database.Database): void {
   migrateAssetLibrarySchema(db);
+  migrateCharacterGroupSchema(db);
   const columns = db.prepare("PRAGMA table_info(chat_sessions)").all() as { name: string }[];
   const colNames = columns.map(c => c.name);
 
@@ -669,6 +779,19 @@ function migrateDb(db: Database.Database): void {
   // below converts only those rows to `interrupted`.
   if (!msgColNames.includes('stream_status')) {
     safeAddColumn(db, "ALTER TABLE messages ADD COLUMN stream_status TEXT NOT NULL DEFAULT 'completed'");
+  }
+
+  if (!msgColNames.includes('speaker_assistant_id')) {
+    safeAddColumn(db, "ALTER TABLE messages ADD COLUMN speaker_assistant_id TEXT");
+  }
+  if (!msgColNames.includes('group_run_id')) {
+    safeAddColumn(db, "ALTER TABLE messages ADD COLUMN group_run_id TEXT");
+  }
+  if (!msgColNames.includes('batch_sequence')) {
+    safeAddColumn(db, "ALTER TABLE messages ADD COLUMN batch_sequence INTEGER");
+  }
+  if (!msgColNames.includes('message_kind')) {
+    safeAddColumn(db, "ALTER TABLE messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'chat'");
   }
 
   migrateSubagentRunSchema(db);
@@ -1870,7 +1993,7 @@ export function backfillProviderPresetKeys(dbInstance: Database.Database): void 
  * /api/chat/sessions list with `?source=task` query) pass the
  * appropriate set. Defaults to no filter for backwards compatibility.
  */
-export function getAllSessions(opts?: { includeSources?: ReadonlyArray<'user' | 'task'> }): ChatSession[] {
+export function getAllSessions(opts?: { includeSources?: ReadonlyArray<'user' | 'task' | 'private'> }): ChatSession[] {
   const db = getDb();
   const filter = opts?.includeSources;
   if (filter && filter.length > 0) {
@@ -1879,7 +2002,11 @@ export function getAllSessions(opts?: { includeSources?: ReadonlyArray<'user' | 
       .prepare(`SELECT * FROM chat_sessions WHERE source IN (${placeholders}) ORDER BY updated_at DESC`)
       .all(...filter) as ChatSession[];
   }
-  return db.prepare('SELECT * FROM chat_sessions ORDER BY updated_at DESC').all() as ChatSession[];
+  // Private sessions are never part of a normal "all sessions" query. They
+  // are addressed only through the privacy cleanup route, so a temporary
+  // conversation cannot leak into search, Telegram, imports, or workspace
+  // buddy resolution while it is still alive.
+  return db.prepare("SELECT * FROM chat_sessions WHERE source != 'private' ORDER BY updated_at DESC").all() as ChatSession[];
 }
 
 /**
@@ -1955,7 +2082,7 @@ export function createSession(
   mode?: string,
   providerId?: string,
   permissionProfile?: SessionPermissionProfile,
-  source?: 'user' | 'task',
+  source?: 'user' | 'task' | 'private',
   /**
    * Provenance of `title`. Defaults to the honest reading of the args: a
    * caller that passed no title gets 'placeholder' (a fallback may fill it
@@ -1970,7 +2097,7 @@ export function createSession(
   const now = new Date().toISOString().replace('T', ' ').split('.')[0];
   const wd = workingDirectory || '';
   const projectName = path.basename(wd);
-  const sourceValue = source === 'task' ? 'task' : 'user';
+  const sourceValue = source === 'task' || source === 'private' ? source : 'user';
   const originValue: TitleOrigin = titleOrigin ?? (title ? 'manual' : 'placeholder');
 
   db.prepare(
@@ -2009,7 +2136,7 @@ export function getLatestSessionByWorkingDirectory(
       .get(workingDirectory, ...filter) as ChatSession | undefined;
   }
   return db
-    .prepare('SELECT * FROM chat_sessions WHERE working_directory = ? ORDER BY updated_at DESC LIMIT 1')
+    .prepare("SELECT * FROM chat_sessions WHERE working_directory = ? AND source != 'private' ORDER BY updated_at DESC LIMIT 1")
     .get(workingDirectory) as ChatSession | undefined;
 }
 
@@ -2025,10 +2152,46 @@ export function deleteSession(id: string): boolean {
   return txn();
 }
 
+/** Delete one session only when it belongs to the temporary privacy space. */
+export function deletePrivateSession(id: string): boolean {
+  const session = getSession(id);
+  if (!session || session.source !== 'private') return false;
+  return deleteSession(id);
+}
+
+/**
+ * Remove private sessions left behind by a renderer crash or application
+ * restart. Private sessions are deliberately not recoverable conversations;
+ * their only lifetime is the current privacy-mode process/window.
+ */
+export function purgePrivateSessions(dbInstance: Database.Database = getDb()): number {
+  const txn = dbInstance.transaction(() => {
+    dbInstance.exec(
+      "DELETE FROM channel_outbound_refs WHERE codepilot_session_id IN (SELECT id FROM chat_sessions WHERE source = 'private')",
+    );
+    return dbInstance.prepare("DELETE FROM chat_sessions WHERE source = 'private'").run().changes;
+  });
+  return txn();
+}
+
 export function updateSessionTimestamp(id: string): void {
   const db = getDb();
   const now = new Date().toISOString().replace('T', ' ').split('.')[0];
   db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(now, id);
+}
+
+export function updateSessionConversationBinding(
+  id: string,
+  binding: { kind: 'single' | 'character' | 'group'; assistantId?: string; groupId?: string },
+): void {
+  const db = getDb();
+  db.prepare(
+    'UPDATE chat_sessions SET conversation_kind = ?, assistant_id = ?, group_id = ? WHERE id = ?',
+  ).run(binding.kind, binding.assistantId || '', binding.groupId || '', id);
+}
+
+export function sessionHasMessages(id: string): boolean {
+  return !!getDb().prepare('SELECT 1 FROM messages WHERE session_id = ? LIMIT 1').get(id);
 }
 
 /**
@@ -3099,6 +3262,10 @@ export function addMessage(
   metadata?: {
     task_run_id?: string | null;
     stream_status?: 'streaming' | 'completed' | 'interrupted' | 'error';
+    speaker_assistant_id?: string | null;
+    group_run_id?: string | null;
+    batch_sequence?: number | null;
+    message_kind?: 'chat' | 'group_nudge' | 'system';
   },
 ): Message {
   const db = getDb();
@@ -3106,10 +3273,20 @@ export function addMessage(
   const now = new Date().toISOString().replace('T', ' ').split('.')[0];
   const taskRunId = metadata?.task_run_id ?? null;
   const streamStatus = metadata?.stream_status ?? 'completed';
+  const speakerAssistantId = metadata?.speaker_assistant_id ?? null;
+  const groupRunId = metadata?.group_run_id ?? null;
+  const batchSequence = metadata?.batch_sequence ?? null;
+  const messageKind = metadata?.message_kind ?? 'chat';
 
   db.prepare(
-    'INSERT INTO messages (id, session_id, role, content, created_at, token_usage, task_run_id, stream_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(id, sessionId, role, content, now, tokenUsage || null, taskRunId, streamStatus);
+    `INSERT INTO messages (
+      id, session_id, role, content, created_at, token_usage, task_run_id, stream_status,
+      speaker_assistant_id, group_run_id, batch_sequence, message_kind
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    id, sessionId, role, content, now, tokenUsage || null, taskRunId, streamStatus,
+    speakerAssistantId, groupRunId, batchSequence, messageKind,
+  );
 
   updateSessionTimestamp(sessionId);
 
@@ -3364,6 +3541,7 @@ export function runRuntimeStartupRecoveryOnce(
     writeRuntimeOwner(owner);
     state.runtimeOwnerToken = owner.token;
     recoverRuntimeStateAfterProcessRestart(dbInstance);
+    purgePrivateSessions(dbInstance);
     return true;
   });
 }

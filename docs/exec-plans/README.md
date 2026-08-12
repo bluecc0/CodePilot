@@ -101,6 +101,7 @@
 
 | 文件 | 主题 | 状态 |
 |------|------|------|
+| [active/multi-character-group-chat.md](active/multi-character-group-chat.md) | **多角色卡与群聊编排**：独立实现 V1/V2/V3 JSON/PNG 角色卡、角色单聊/群组管理、持久化顺序批次、隐私遮罩与本地壁纸，以及后续自然发言与协作合同 | 🟡 单聊/群聊/个性化 code complete；真实 Provider smoke 待执行 |
 | [active/production-observation-remediation-2026-08-07.md](active/production-observation-remediation-2026-08-07.md) | **0.65 生产观察修复闭环**：补 Sentry IP/Geo null tombstone、Electron 启动 session、Windows 外链 Promise 失败反馈，以及 Native 残缺 tool-call 历史的诚实配对修复 | 🔄 Phase 0 完成，Phase 1–4 实施中；新 stable packaged/Sentry cohort 待发布后验收 |
 | [active/windows-review-remediation-2026-08-07.md](active/windows-review-remediation-2026-08-07.md) | **Windows 适配独立审查修复闭环**：修复 Provider secret 迁移启动阻断、无 `rg` 正则回退卡死、macOS `//`/`/mnt` 路径误判与非 Windows PowerShell 恢复文案；P2 逐项修复或登记 | 🟡 Code complete + Tests pass + Review passed；Windows packaged smoke 待执行 |
 | [active/harness-home-user-owned-core.md](active/harness-home-user-owned-core.md) | **Harness Home Umbrella**：用户所有的 Assistant files/services、跨 Runtime Capability Packages 与 Assets；普通文件始终可读，助理自动服务显式激活，能力通过 Broker 相互调用，不再建设独立审美/workflow 系统 | 🔄 Program A/B foundation 与默认助理切片已落地；当前 Program C 按用户纠正重写，待 Claude 审查 |

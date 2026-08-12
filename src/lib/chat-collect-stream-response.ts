@@ -98,6 +98,12 @@ export async function collectStreamResponse(
       providerId: string;
       model?: string;
     };
+    messageMetadata?: {
+      speaker_assistant_id?: string | null;
+      group_run_id?: string | null;
+      batch_sequence?: number | null;
+      message_kind?: 'chat' | 'group_nudge' | 'system';
+    };
   },
 ) {
   const reader = stream.getReader();
@@ -140,6 +146,7 @@ export async function collectStreamResponse(
     } else {
       const saved = addMessage(sessionId, 'assistant', content, usage, {
         stream_status: 'streaming',
+        ...opts?.messageMetadata,
       });
       checkpointMessageId = saved.id;
     }
@@ -167,6 +174,7 @@ export async function collectStreamResponse(
     } else {
       const saved = addMessage(sessionId, 'assistant', content, usage, {
         stream_status: status,
+        ...opts?.messageMetadata,
       });
       checkpointMessageId = saved.id;
       lastSavedAssistantMsgId = saved.id;

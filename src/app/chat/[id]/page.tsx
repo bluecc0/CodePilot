@@ -35,6 +35,7 @@ export default function ChatSessionPage({ params }: ChatSessionPageProps) {
   const [sessionInfoLoaded, setSessionInfoLoaded] = useState(false);
   const [sessionPermissionProfile, setSessionPermissionProfile] = useState<SessionPermissionProfile>('default');
   const [sessionMode, setSessionMode] = useState<'code' | 'plan'>('code');
+  const [sessionAssistantId, setSessionAssistantId] = useState('');
   const [sessionHasSummary, setSessionHasSummary] = useState(false);
   const { setWorkingDirectory, setSessionId, setSessionTitle: setPanelSessionTitle, setFileTreeOpen } = usePanel();
   const ws = useWorkspaceSidebarOptional();
@@ -50,6 +51,7 @@ export default function ChatSessionPage({ params }: ChatSessionPageProps) {
     setSessionModel('');
     setSessionProviderId('');
     setSessionRuntimePin('');
+    setSessionAssistantId('');
     setSessionInfoLoaded(false);
 
     async function loadSession() {
@@ -78,6 +80,7 @@ export default function ChatSessionPage({ params }: ChatSessionPageProps) {
           setSessionRuntimePin(data.session.runtime_pin || '');
           setSessionPermissionProfile(normalizePermissionProfile(data.session.permission_profile));
           setSessionMode((data.session.mode as 'code' | 'plan') || 'code');
+          setSessionAssistantId(data.session.assistant_id || '');
           setSessionHasSummary(!!data.session.context_summary);
 
           // Interrupt/phase reconcile — reconcile the client stream phase against the
@@ -247,7 +250,7 @@ export default function ChatSessionPage({ params }: ChatSessionPageProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <ChatView key={id} sessionId={id} initialMessages={messages} initialHasMore={hasMore} modelName={sessionModel} providerId={sessionProviderId} runtimePin={sessionRuntimePin} initialPermissionProfile={sessionPermissionProfile} initialMode={sessionMode} initialHasSummary={sessionHasSummary} />
+      <ChatView key={id} sessionId={id} initialMessages={messages} initialHasMore={hasMore} modelName={sessionModel} providerId={sessionProviderId} runtimePin={sessionRuntimePin} assistantId={sessionAssistantId} initialPermissionProfile={sessionPermissionProfile} initialMode={sessionMode} initialHasSummary={sessionHasSummary} />
     </div>
   );
 }

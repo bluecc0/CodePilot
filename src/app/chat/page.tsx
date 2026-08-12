@@ -7,6 +7,7 @@ import type { SessionPermissionProfile } from '@/lib/permission/profile';
 import { MessageList } from '@/components/chat/MessageList';
 import { MessageInput, composerDraftKey } from '@/components/chat/MessageInput';
 import { ChatComposerActionBar } from '@/components/chat/ChatComposerActionBar';
+import { CharacterSelector } from '@/components/characters/CharacterSelector';
 import { ModeIndicator } from '@/components/chat/ModeIndicator';
 import { ChatPermissionSelector } from '@/components/chat/ChatPermissionSelector';
 import { RuntimeSelector } from '@/components/chat/RuntimeSelector';
@@ -69,6 +70,19 @@ interface ToolResultInfo {
 }
 
 export default function NewChatPage() {
+  return (
+    <Suspense fallback={null}>
+      <NewChatPageInner />
+    </Suspense>
+  );
+}
+
+/**
+ * Reusable first-turn surface for privacy mode. Normal `/chat` hands the
+ * first session off to `/chat/:id`; privacy mode keeps it under `/privacy`
+ * and marks the backing row as temporary.
+ */
+export function NewChatPageContent({ ephemeral = false }: { ephemeral?: boolean } = {}) {
   // useSearchParams in App Router needs a Suspense boundary. The body of
   // NewChatPage was previously reading window.location.search inside a
   // `useMemo([])` to avoid that wrapper, but `useMemo([])` only runs once
@@ -80,12 +94,12 @@ export default function NewChatPage() {
   // breaking SSR/static prerender.
   return (
     <Suspense fallback={null}>
-      <NewChatPageInner />
+      <NewChatPageInner ephemeral={ephemeral} />
     </Suspense>
   );
 }
 
-function NewChatPageInner() {
+function NewChatPageInner({ ephemeral = false }: { ephemeral?: boolean } = {}) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const prefillText = searchParams.get('prefill') || '';
@@ -151,6 +165,7 @@ function NewChatPageInner() {
   const [showWizard, setShowWizard] = useState(false);
   const [assistantConfigured, setAssistantConfigured] = useState(false);
   const [assistantWorkspacePath, setAssistantWorkspacePath] = useState('');
+  const [selectedAssistantId, setSelectedAssistantId] = useState('');
   const [mode, setMode] = useState('code');
   // Model/provider start empty — populated by the async global-default fetch.
   // This prevents the race where a user sends before the fetch completes and
@@ -886,6 +901,8 @@ function NewChatPageInner() {
           model: currentModel,
           provider_id: currentProviderId,
         };
+        if (ephemeral) createBody.ephemeral = 'true';
+        if (selectedAssistantId) createBody.assistant_id = selectedAssistantId;
 
         const createRes = await fetch('/api/chat/sessions', {
           method: 'POST',
@@ -949,6 +966,7 @@ function NewChatPageInner() {
             mode,
             model: currentModel,
             provider_id: currentProviderId,
+            ...(selectedAssistantId ? { assistant_id: selectedAssistantId } : {}),
             ...(files && files.length > 0 ? { files } : {}),
             ...(mentions && mentions.length > 0 ? { mentions } : {}),
             ...(systemPromptAppend ? { systemPromptAppend } : {}),
@@ -1270,7 +1288,11 @@ function NewChatPageInner() {
         // if the user is still on this new-chat page. If they switched away
         // mid-stream (navGuard deactivated on unmount), suppress the push so
         // we don't drag them back to the just-created session (Phase 2 ③).
-        navGuardRef.current?.navigate(() => router.push(`/chat/${session.id}`));
+        if (ephemeral) {
+          navGuardRef.current?.navigate(() => router.replace(`/privacy?session=${encodeURIComponent(session.id)}`));
+        } else {
+          navGuardRef.current?.navigate(() => router.push(`/chat/${session.id}`));
+        }
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
           // Aborted — either the user hit stop, or the page unmounted (session
@@ -1278,7 +1300,11 @@ function NewChatPageInner() {
           // the session if the guard is still active (user stopped while
           // still here); a switch-away abort must NOT push them back.
           if (sessionId) {
-            navGuardRef.current?.navigate(() => router.push(`/chat/${sessionId}`));
+            if (ephemeral) {
+              navGuardRef.current?.navigate(() => router.replace(`/privacy?session=${encodeURIComponent(sessionId)}`));
+            } else {
+              navGuardRef.current?.navigate(() => router.push(`/chat/${sessionId}`));
+            }
           }
         } else {
           const errMsg = error instanceof Error ? error.message : 'Unknown error';
@@ -1304,7 +1330,7 @@ function NewChatPageInner() {
         firstSendInFlightRef.current = false;
       }
     },
-    [isStreaming, router, workingDir, mode, currentModel, currentProviderId, runtimePin, permissionProfile, selectedEffort, thinkingMode, context1m, setPendingApprovalSessionId, setPanelSessionId, setPanelWorkingDirectory, t, canSendWithCurrentProvider, modelReady, noCompatibleProvider, invalidDefault]
+    [ephemeral, isStreaming, router, workingDir, mode, currentModel, currentProviderId, runtimePin, permissionProfile, selectedEffort, thinkingMode, context1m, selectedAssistantId, setPendingApprovalSessionId, setPanelSessionId, setPanelWorkingDirectory, t, canSendWithCurrentProvider, modelReady, noCompatibleProvider, invalidDefault]
   );
 
   const handleCommand = useCallback((command: string) => {
@@ -1468,6 +1494,7 @@ function NewChatPageInner() {
       <ChatComposerActionBar
         left={
           <>
+            <CharacterSelector value={selectedAssistantId} onChange={setSelectedAssistantId} disabled={isStreaming} />
             <ModeIndicator mode={mode} onModeChange={setMode} disabled={isStreaming} />
             <RuntimeSelector
               runtimePin={runtimePin}

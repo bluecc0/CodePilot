@@ -29,6 +29,7 @@ export type SettingsSection =
   | "health"
   | "usage"
   | "assistant"
+  | "characters"
   | "tasks"
   | "bridge"
   | "about";
@@ -60,6 +61,7 @@ export const SETTINGS_NAV_ITEMS: SettingsNavItem[] = [
   { id: "health", label: "Health", icon: "health", href: "/settings/health", i18nKey: "settings.health" as TranslationKey },
   { id: "usage", label: "Usage", icon: "usage", href: "/settings/usage", i18nKey: "settings.usage" as TranslationKey },
   { id: "assistant", label: "Assistant", icon: "assistant", href: "/settings/assistant", i18nKey: "settings.assistant" as TranslationKey },
+  { id: "characters", label: "Characters", icon: "assistant", href: "/settings/characters", i18nKey: "settings.characters" as TranslationKey },
   // Phase 3 Step 3 — global tasks center (independent of Assistant).
   { id: "tasks", label: "Tasks", icon: "task", href: "/settings/tasks", i18nKey: "settings.tasks" as TranslationKey },
   // Bridge moved from top-level rail entry into Settings (2026-05-02).

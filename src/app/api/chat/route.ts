@@ -26,6 +26,9 @@ import {
 import { buildReviewEvent } from '@/lib/permission/review-event';
 import { emitReviewEvent } from '@/lib/permission/review-audit';
 import { isAutoReviewSupported, getAutoReviewUnavailableReason } from '@/lib/permission/sdk-capability';
+import { buildCharacterSystemPrompt } from '@/lib/character-card';
+import { getAssistantGroup, getCharacterProfile, getGroupRun, updateGroupRun } from '@/lib/character-store';
+import { clearRuntimeSessionRef } from '@/lib/runtime/session-store';
 
 // codex-stop-recovery Phase 3 — after an explicit Runtime interrupt aborts the
 // turn controller, how long to wait for the natural interrupt→terminal→collect
@@ -59,7 +62,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body: SendMessageRequest & { files?: FileAttachment[]; toolTimeout?: number; provider_id?: string; systemPromptAppend?: string; autoTrigger?: boolean; thinking?: unknown; effort?: string; enableFileCheckpointing?: boolean; displayOverride?: string; context_1m?: boolean; selectedSkills?: readonly string[] } = await request.json();
-    const { session_id, content, model, mode, files, toolTimeout, provider_id, systemPromptAppend, autoTrigger, thinking, effort, enableFileCheckpointing, displayOverride, context_1m, selectedSkills } = body;
+    const { session_id, content, model, mode, files, toolTimeout, provider_id, systemPromptAppend, autoTrigger, thinking, effort, enableFileCheckpointing, displayOverride, context_1m, selectedSkills, assistant_id, group_run_id, batch_sequence, continue_group } = body;
 
     // Required-field validation BEFORE any use of `content` (audit ③). The
     // logs below read content.length/slice; a missing or non-string content
@@ -98,6 +101,59 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    let characterSystemPrompt = '';
+    let groupTurn: { runId: string; assistantId: string; sequence: number } | null = null;
+    const hasGroupTurnMetadata = group_run_id !== undefined || batch_sequence !== undefined || continue_group !== undefined;
+    if (hasGroupTurnMetadata) {
+      if (!assistant_id || !group_run_id || !Number.isInteger(batch_sequence) || batch_sequence! < 0) {
+        return Response.json({ error: 'Incomplete group turn metadata', code: 'INVALID_GROUP_TURN' }, { status: 400 });
+      }
+      if (typeof continue_group !== 'boolean' || continue_group !== (batch_sequence! > 0)) {
+        return Response.json({ error: 'Group continuation does not match its queue position', code: 'INVALID_GROUP_CONTINUATION' }, { status: 400 });
+      }
+      const run = getGroupRun(group_run_id);
+      const group = run ? getAssistantGroup(run.group_id) : undefined;
+      const queue = run ? JSON.parse(run.speaker_queue_json) as Array<{ assistantId: string; sequence: number }> : [];
+      const expected = queue[batch_sequence!];
+      const member = group?.members?.find(item => item.assistant_id === assistant_id && item.enabled === 1);
+      const profile = getCharacterProfile(assistant_id);
+      if (!run || !group || !profile || !member || run.session_id !== session_id
+        || session.conversation_kind !== 'group' || session.group_id !== group.id
+        || expected?.assistantId !== assistant_id || expected.sequence !== batch_sequence) {
+        return Response.json({ error: 'Group turn does not match its durable queue', code: 'GROUP_TURN_MISMATCH' }, { status: 409 });
+      }
+      if (!['pending', 'running'].includes(run.status) || run.next_index !== batch_sequence!) {
+        return Response.json({ error: 'Group turn is already settled', code: 'GROUP_TURN_SETTLED' }, { status: 409 });
+      }
+      characterSystemPrompt = buildCharacterSystemPrompt(profile, {
+        name: group.name,
+        objective: run.objective,
+        roleLabel: member.role_label,
+        peerNames: (group.members || []).filter(item => item.enabled === 1 && item.assistant_id !== assistant_id)
+          .map(item => item.assistant?.name || '').filter(Boolean),
+      });
+      groupTurn = { runId: run.id, assistantId: assistant_id, sequence: batch_sequence! };
+    } else if (assistant_id !== undefined) {
+      if (typeof assistant_id !== 'string' || !assistant_id) {
+        return Response.json({ error: 'Invalid character', code: 'INVALID_CHARACTER' }, { status: 400 });
+      }
+      const profile = getCharacterProfile(assistant_id);
+      if (!profile || session.conversation_kind !== 'character' || session.assistant_id !== assistant_id) {
+        return Response.json({ error: 'Character does not match this session', code: 'CHARACTER_SESSION_MISMATCH' }, { status: 409 });
+      }
+      characterSystemPrompt = buildCharacterSystemPrompt(profile);
+    } else if (session.conversation_kind === 'character' || session.conversation_kind === 'group') {
+      return Response.json({ error: 'Conversation identity metadata is required', code: 'MISSING_CONVERSATION_IDENTITY' }, { status: 400 });
+    }
+
+    const effectiveSystemPromptAppend = [systemPromptAppend, characterSystemPrompt].filter(Boolean).join('\n\n');
+    const modelPrompt = continue_group
+      ? 'Continue the current group turn. Respond once as your assigned character, taking the latest user request and prior character replies into account.'
+      : content;
+    if (continue_group && files && files.length > 0) {
+      return Response.json({ error: 'Attachments belong on the first group speaker only', code: 'GROUP_ATTACHMENTS_ALREADY_SAVED' }, { status: 400 });
+    }
+
     // Acquire exclusive lock for this session to prevent concurrent requests
     const lockId = crypto.randomBytes(8).toString('hex');
     const lockAcquired = acquireSessionLock(session_id, lockId, `chat-${process.pid}`, 600);
@@ -110,6 +166,16 @@ export async function POST(request: NextRequest) {
     activeSessionId = session_id;
     activeLockId = lockId;
     setSessionRuntimeStatus(session_id, 'running');
+
+    if (groupTurn) {
+      // A resumed SDK/Codex thread would keep the previous role's system state.
+      // Clear refs only after this turn owns the session lock; a rejected
+      // concurrent request must never invalidate the active turn's resume state.
+      clearRuntimeSessionRef(session_id, 'claude_code');
+      clearRuntimeSessionRef(session_id, 'codex_runtime');
+      session.sdk_session_id = '';
+      session.codex_thread_id = '';
+    }
 
     // ─── Phase 2 Step 3 — early resolver gate ───────────────────────
     //
@@ -320,7 +386,7 @@ export async function POST(request: NextRequest) {
         : deriveConversationTitle(displayOverride || content) || session.title,
       workingDirectory: session.working_directory,
     };
-    if (!autoTrigger) {
+    if (!autoTrigger && !continue_group) {
       notifySessionStart(telegramNotifyOpts).catch(() => {});
     }
 
@@ -368,34 +434,42 @@ export async function POST(request: NextRequest) {
         }));
         savedContent = `<!--files:${JSON.stringify(fileMeta)}-->${displayOverride || content}`;
       }
-      addMessage(session_id, 'user', savedContent);
+      if (!continue_group) {
+        const savedUserMessage = addMessage(session_id, 'user', savedContent, undefined, groupTurn ? {
+          group_run_id: groupTurn.runId,
+          message_kind: 'chat',
+        } : undefined);
+        if (groupTurn) {
+          updateGroupRun(groupTurn.runId, { status: 'running', userMessageId: savedUserMessage.id });
+        }
 
-      // Fallback title — derived from the first REAL user message, which is
-      // exactly the message we just persisted (autoTrigger turns never reach
-      // here, so an invisible system trigger can't name the user's chat).
-      //
-      // Input is `displayOverride || content`, NOT `content`: `content` is the
-      // model-facing text and may carry the `[Referenced Directories]` block
-      // expanded from @-mentions / directory chips. Titling on that leaked
-      // attachment paths and file summaries into the sidebar (the privacy bug
-      // this replaces).
-      //
-      // The CAS on 'placeholder' is what makes this safe to run on every
-      // non-autoTrigger send instead of gating on `title === 'New Chat'`: a
-      // session that already has any real title — manual, system, import, or
-      // an earlier fallback — matches zero rows and is left alone.
-      const fallbackTitle = deriveConversationTitle(displayOverride || content);
-      if (fallbackTitle) {
-        // The CAS return value doubles as the "this is the FIRST real turn"
-        // signal for Phase 2 semantic generation: it is true exactly once per
-        // session, on the send that moved `placeholder -> fallback`. Deriving
-        // "first turn" this way rather than by counting messages means the two
-        // features can never disagree about which message named the chat.
-        const landed = updateSessionTitle(session_id, fallbackTitle, 'fallback', {
-          expectOrigin: ['placeholder'],
-        });
-        if (landed) {
-          titleGenerationInput = displayOverride || content;
+        // Fallback title — derived from the first REAL user message, which is
+        // exactly the message we just persisted (autoTrigger turns never reach
+        // here, so an invisible system trigger can't name the user's chat).
+        //
+        // Input is `displayOverride || content`, NOT `content`: `content` is the
+        // model-facing text and may carry the `[Referenced Directories]` block
+        // expanded from @-mentions / directory chips. Titling on that leaked
+        // attachment paths and file summaries into the sidebar (the privacy bug
+        // this replaces).
+        //
+        // The CAS on 'placeholder' is what makes this safe to run on every
+        // non-autoTrigger send instead of gating on `title === 'New Chat'`: a
+        // session that already has any real title — manual, system, import, or
+        // an earlier fallback — matches zero rows and is left alone.
+        const fallbackTitle = deriveConversationTitle(displayOverride || content);
+        if (fallbackTitle) {
+          // The CAS return value doubles as the "this is the FIRST real turn"
+          // signal for Phase 2 semantic generation: it is true exactly once per
+          // session, on the send that moved `placeholder -> fallback`. Deriving
+          // "first turn" this way rather than by counting messages means the two
+          // features can never disagree about which message named the chat.
+          const landed = updateSessionTitle(session_id, fallbackTitle, 'fallback', {
+            expectOrigin: ['placeholder'],
+          });
+          if (landed) {
+            titleGenerationInput = displayOverride || content;
+          }
         }
       }
     }
@@ -550,7 +624,7 @@ export async function POST(request: NextRequest) {
     const sessionSummaryData = getSessionSummary(session_id);
 
     // Exclude the user message we just saved (last in the list) — it's already the prompt
-    const historyBeforeBoundary = recentMsgs.slice(0, -1);
+    const historyBeforeBoundary = continue_group ? recentMsgs : recentMsgs.slice(0, -1);
     // Drop history at-or-before the coverage boundary
     // (context_summary_boundary_rowid — the rowid of the last message
     // actually covered by the summary). Rowid, not timestamp: disambiguates
@@ -579,8 +653,8 @@ export async function POST(request: NextRequest) {
     const assembled = await assembleContext({
       session,
       entryPoint: 'desktop',
-      userPrompt: content,
-      systemPromptAppend,
+      userPrompt: modelPrompt,
+      systemPromptAppend: effectiveSystemPromptAppend || undefined,
       conversationHistory: historyMsgs,
       autoTrigger: !!autoTrigger,
       nativeProjectRulesOwner:
@@ -649,7 +723,7 @@ export async function POST(request: NextRequest) {
       const estimate = estimateContextTokens({
         systemPrompt: finalSystemPrompt,
         history: normalizedHistory,
-        currentUserMessage: content,
+        currentUserMessage: modelPrompt,
         sessionSummary: activeSessionSummary,
       });
 
@@ -757,7 +831,7 @@ export async function POST(request: NextRequest) {
       systemPromptFirst200: finalSystemPrompt?.slice(0, 200) || 'none',
     });
     const stream = streamClaude({
-      prompt: content,
+      prompt: modelPrompt,
       callScene: 'interactive_chat',
       sessionId: session_id,
       // Session-lock ownership token minted above (crypto.randomBytes). Plumbed
@@ -907,7 +981,13 @@ export async function POST(request: NextRequest) {
     collectStreamResponse(streamForCollect, session_id, lockId, telegramNotifyOpts, () => {
       settleLock('idle');
     }, {
-      suppressNotifications: !!autoTrigger,
+      suppressNotifications: !!autoTrigger || !!groupTurn,
+      messageMetadata: groupTurn ? {
+        speaker_assistant_id: groupTurn.assistantId,
+        group_run_id: groupTurn.runId,
+        batch_sequence: groupTurn.sequence,
+        message_kind: 'chat',
+      } : undefined,
       // Phase 2 semantic title. Non-null only on the first real user turn.
       // The provider/runtime handed over here are THIS session's resolved
       // values — the same ones that answered the message — so generation can

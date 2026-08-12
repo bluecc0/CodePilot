@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useTheme } from "next-themes";
 import { codeToHtml, type BundledTheme } from "shiki";
 import { useThemeFamily } from "@/lib/theme/context";
@@ -21,6 +21,8 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { SettingsCard } from "@/components/patterns/SettingsCard";
 import { FieldRow } from "@/components/patterns/FieldRow";
+import { Input } from '@/components/ui/input';
+import { WALLPAPER_UPDATED_EVENT, type WallpaperState } from '@/components/layout/AppWallpaper';
 
 // ── Theme Mode Pill Selector ────────────────────────────────────────
 
@@ -158,6 +160,62 @@ export function AppearanceSection() {
   const { family, setFamily: setFamilyRaw, families } = useThemeFamily();
   const { t } = useTranslation();
   const isDark = resolvedTheme === "dark";
+  const wallpaperInputRef = useRef<HTMLInputElement>(null);
+  const [wallpaper, setWallpaper] = useState<WallpaperState>({ exists: false, opacity: 0.18, revision: '0', imageUrl: '' });
+  const [wallpaperBusy, setWallpaperBusy] = useState(false);
+  const [wallpaperError, setWallpaperError] = useState('');
+
+  const publishWallpaper = useCallback((next: WallpaperState) => {
+    setWallpaper(next);
+    window.dispatchEvent(new CustomEvent(WALLPAPER_UPDATED_EVENT, { detail: next }));
+  }, []);
+
+  useEffect(() => {
+    fetch('/api/settings/wallpaper?meta=1', { cache: 'no-store' })
+      .then(response => response.ok ? response.json() : null)
+      .then(data => { if (data) setWallpaper(data); })
+      .catch(() => {});
+  }, []);
+
+  const uploadWallpaper = useCallback(async (file: File) => {
+    setWallpaperBusy(true);
+    setWallpaperError('');
+    try {
+      const form = new FormData();
+      form.set('file', file);
+      const response = await fetch('/api/settings/wallpaper', { method: 'POST', body: form });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || t('settings.wallpaperUploadFailed'));
+      publishWallpaper(data);
+    } catch (error) {
+      setWallpaperError(error instanceof Error ? error.message : t('settings.wallpaperUploadFailed'));
+    } finally {
+      setWallpaperBusy(false);
+      if (wallpaperInputRef.current) wallpaperInputRef.current.value = '';
+    }
+  }, [publishWallpaper, t]);
+
+  const persistWallpaperOpacity = useCallback(async (opacity: number) => {
+    const response = await fetch('/api/settings/wallpaper', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ opacity }),
+    });
+    if (response.ok) publishWallpaper(await response.json());
+  }, [publishWallpaper]);
+
+  const removeWallpaper = useCallback(async () => {
+    setWallpaperBusy(true);
+    setWallpaperError('');
+    try {
+      const response = await fetch('/api/settings/wallpaper', { method: 'DELETE' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || t('settings.wallpaperRemoveFailed'));
+      publishWallpaper(data);
+    } catch (error) {
+      setWallpaperError(error instanceof Error ? error.message : t('settings.wallpaperRemoveFailed'));
+    } finally {
+      setWallpaperBusy(false);
+    }
+  }, [publishWallpaper, t]);
 
   const setTheme = useCallback((mode: string) => {
     setThemeRaw(mode);
@@ -244,6 +302,62 @@ export function AppearanceSection() {
         <UIPreview />
         <ShikiCodePreview isDark={isDark} />
       </div>
+      </SettingsCard>
+
+      <SettingsCard>
+        <FieldRow
+          label={t('settings.wallpaper')}
+          description={t('settings.wallpaperDesc')}
+        >
+          <div className="flex flex-wrap justify-end gap-2">
+            <Input
+              ref={wallpaperInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              className="hidden"
+              onChange={event => { const file = event.target.files?.[0]; if (file) void uploadWallpaper(file); }}
+            />
+            <Button variant="outline" size="sm" disabled={wallpaperBusy} onClick={() => wallpaperInputRef.current?.click()}>
+              <CodePilotIcon name="upload" size="sm" aria-hidden />
+              {wallpaperBusy ? t('settings.wallpaperWorking') : t('settings.wallpaperUpload')}
+            </Button>
+            {wallpaper.exists && <Button variant="ghost" size="sm" disabled={wallpaperBusy} onClick={() => void removeWallpaper()}>{t('settings.wallpaperRemove')}</Button>}
+          </div>
+        </FieldRow>
+
+        {wallpaper.exists && (
+          <FieldRow
+            label={t('settings.wallpaperOpacity')}
+            description={t('settings.wallpaperOpacityDesc')}
+            separator
+          >
+            <div className="flex w-full max-w-xs items-center gap-3">
+              <Input
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={Math.round(wallpaper.opacity * 100)}
+                aria-label={t('settings.wallpaperOpacity')}
+                onInput={event => publishWallpaper({ ...wallpaper, opacity: Number(event.currentTarget.value) / 100 })}
+                onPointerUp={event => void persistWallpaperOpacity(Number(event.currentTarget.value) / 100)}
+                onKeyUp={event => void persistWallpaperOpacity(Number(event.currentTarget.value) / 100)}
+                onBlur={event => void persistWallpaperOpacity(Number(event.currentTarget.value) / 100)}
+                className="h-2 cursor-pointer border-0 p-0"
+              />
+              <span className="w-11 text-right text-xs tabular-nums text-muted-foreground">{Math.round(wallpaper.opacity * 100)}%</span>
+            </div>
+          </FieldRow>
+        )}
+
+        {wallpaper.exists && (
+          <div className="mt-5 aspect-[16/5] overflow-hidden rounded-xl border border-border/60 bg-muted">
+            {/* eslint-disable-next-line @next/next/no-img-element -- authenticated local settings endpoint */}
+            <img src={wallpaper.imageUrl} alt={t('settings.wallpaperPreview')} className="h-full w-full object-cover" style={{ opacity: wallpaper.opacity }} />
+          </div>
+        )}
+        <p className="mt-3 text-[11px] text-muted-foreground">{t('settings.wallpaperFormats')}</p>
+        {wallpaperError && <p role="alert" className="mt-2 text-xs text-destructive">{wallpaperError}</p>}
       </SettingsCard>
     </div>
   );

@@ -31,7 +31,8 @@ export type { SessionPermissionProfile };
  * heartbeat does NOT introduce an `'assistant'` value here; that
  * dimension lives on the heartbeat task itself (`source` field).
  */
-export type ChatSessionSource = 'user' | 'task';
+export type ChatSessionSource = 'user' | 'task' | 'private';
+export type ConversationKind = 'single' | 'character' | 'group';
 
 export interface ChatSession {
   id: string;
@@ -80,6 +81,10 @@ export interface ChatSession {
    * task-bound sessions don't pollute the user-facing list.
    */
   source?: ChatSessionSource;
+  /** Conversation ownership is explicit; working_directory is not an identity key. */
+  conversation_kind?: ConversationKind;
+  assistant_id?: string;
+  group_id?: string;
   status: 'active' | 'archived';
   mode?: 'code' | 'plan' | 'ask';
   needs_approval?: boolean;
@@ -248,6 +253,11 @@ export interface Message {
    * into `content`. NULL for normal user-authored messages.
    */
   task_run_id?: string | null;
+  /** Character/group rendering metadata. Never inferred from message text. */
+  speaker_assistant_id?: string | null;
+  group_run_id?: string | null;
+  batch_sequence?: number | null;
+  message_kind?: 'chat' | 'group_nudge' | 'system';
   /**
    * SQLite rowid, monotonically increasing per insert — used as the compact
    * coverage boundary (see `context_summary_boundary_rowid`). Populated by
@@ -968,6 +978,11 @@ export interface CreateSessionRequest {
   mode?: string;
   provider_id?: string;
   permission_profile?: SessionPermissionProfile;
+  conversation_kind?: ConversationKind;
+  assistant_id?: string;
+  group_id?: string;
+  /** Create a session that is only visible inside the temporary privacy chat. */
+  ephemeral?: boolean;
 }
 
 export interface SendMessageRequest {
@@ -977,6 +992,119 @@ export interface SendMessageRequest {
   mode?: string;
   provider_id?: string;
   mentions?: MentionRef[];
+  assistant_id?: string;
+  group_run_id?: string;
+  batch_sequence?: number;
+  /** Group orchestrator only: the user row already exists for this durable run. */
+  continue_group?: boolean;
+}
+
+// ==========================================
+// Character cards / multi-character groups
+// ==========================================
+
+export type CharacterCardSpec = 'v1' | 'v2' | 'v3' | 'manual';
+
+export interface CharacterProfile {
+  id: string;
+  name: string;
+  avatar_path: string;
+  description: string;
+  personality: string;
+  scenario: string;
+  first_message: string;
+  message_examples: string;
+  system_prompt: string;
+  post_history_instructions: string;
+  alternate_greetings_json: string;
+  tags_json: string;
+  creator: string;
+  character_version: string;
+  source_spec: CharacterCardSpec;
+  source_metadata_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CharacterProfileInput {
+  name: string;
+  avatar_path?: string;
+  description?: string;
+  personality?: string;
+  scenario?: string;
+  first_message?: string;
+  message_examples?: string;
+  system_prompt?: string;
+  post_history_instructions?: string;
+  alternate_greetings?: string[];
+  tags?: string[];
+  creator?: string;
+  character_version?: string;
+  source_spec?: CharacterCardSpec;
+  source_metadata?: Record<string, unknown>;
+}
+
+export type GroupActivationStrategy = 'list' | 'manual' | 'natural' | 'pooled';
+export type GroupGenerationMode = 'sequential';
+
+export interface AssistantGroupMember {
+  group_id: string;
+  assistant_id: string;
+  sort_order: number;
+  enabled: number;
+  talkativeness: number;
+  role_label: string;
+  assistant?: CharacterProfile;
+}
+
+export interface AssistantGroup {
+  id: string;
+  name: string;
+  description: string;
+  avatar_path: string;
+  activation_strategy: GroupActivationStrategy;
+  generation_mode: GroupGenerationMode;
+  allow_self_responses: number;
+  collaboration_contract_json: string;
+  deleted_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  members?: AssistantGroupMember[];
+}
+
+export interface AssistantGroupInput {
+  name: string;
+  description?: string;
+  avatar_path?: string;
+  activation_strategy?: GroupActivationStrategy;
+  generation_mode?: GroupGenerationMode;
+  allow_self_responses?: boolean;
+  collaboration_contract?: Record<string, unknown>;
+  members: Array<{
+    assistant_id: string;
+    enabled?: boolean;
+    talkativeness?: number;
+    role_label?: string;
+  }>;
+}
+
+export type GroupRunStatus = 'pending' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled';
+
+export interface GroupRun {
+  id: string;
+  session_id: string;
+  group_id: string;
+  mode: GroupActivationStrategy;
+  status: GroupRunStatus;
+  speaker_queue_json: string;
+  next_index: number;
+  user_message_id: string | null;
+  objective: string;
+  contract_json: string;
+  error: string;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 export interface UpdateMCPConfigRequest {

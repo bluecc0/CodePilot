@@ -10,6 +10,7 @@ import { SettingsSidebar } from "./SettingsSidebar";
 import { CardFrame, CardSurface, ResizeGutter } from "./card-primitives";
 import { UpdateBanner } from "./UpdateBanner";
 import { UnifiedTopBar } from "./UnifiedTopBar";
+import { AppWallpaper } from "./AppWallpaper";
 import { WorkspaceSidebarProvider, useWorkspaceSidebar, useWorkspaceSidebarOptional } from "@/hooks/useWorkspaceSidebar";
 import { FileMutationProvider, useFileMutation } from "@/hooks/useFileMutation";
 import { PanelContext, usePanel, type PreviewViewMode, type PreviewSource } from "@/hooks/usePanel";
@@ -248,6 +249,7 @@ function ChatContentRow({
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const isPrivacyRoute = pathname === '/privacy';
 
   const [chatListOpenRaw, setChatListOpenRaw] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
@@ -284,11 +286,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // across windows.
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (!pathname.startsWith('/settings')) {
+    if (!pathname.startsWith('/settings') && !isPrivacyRoute) {
       const fullPath = pathname + window.location.search + window.location.hash;
       sessionStorage.setItem('codepilot:last-non-settings-path', fullPath);
     }
-  }, [pathname]);
+  }, [pathname, isPrivacyRoute]);
 
   // Poll server-side notification queue and display as toasts
   useNotificationPoll();
@@ -378,7 +380,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   // Panel state — chatListOpen is no longer gated by route (sidebar always visible)
-  const isChatRoute = pathname.startsWith("/chat/") || pathname === "/chat";
+  const isChatRoute = !isPrivacyRoute && (pathname.startsWith("/chat/") || pathname === "/chat");
   const chatListOpen = chatListOpenRaw;
 
   const setChatListOpen = useCallback((open: boolean) => {
@@ -405,6 +407,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [sessionTitle, setSessionTitle] = useState("");
   const [streamingSessionId, setStreamingSessionId] = useState("");
   const [pendingApprovalSessionId, setPendingApprovalSessionId] = useState("");
+
+  // Privacy mode owns a temporary session outside the normal chat route. Clear
+  // the shared panel context as soon as that session is disposed so an exit
+  // back to settings or the empty /chat page cannot briefly expose its title,
+  // project, or workspace state through topbar/rail consumers.
+  useEffect(() => {
+    const handler = () => {
+      setSessionId("");
+      setSessionTitle("");
+      setWorkingDirectory("");
+      setStreamingSessionId("");
+      setPendingApprovalSessionId("");
+    };
+    window.addEventListener('privacy-session-closed', handler);
+    return () => window.removeEventListener('privacy-session-closed', handler);
+  }, []);
 
   const { status: gitStatusFromHook } = useGitStatus(workingDirectory);
   const currentBranch = gitStatusFromHook?.branch ?? "";
@@ -451,7 +469,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [splitSessions, setSplitSessions] = useState<SplitSession[]>(() => loadSplitSessions());
   const [activeColumnId, setActiveColumnIdRaw] = useState<string>(() => loadActiveColumn());
   const isSplitActive = splitSessions.length >= 2;
-  const isChatDetailRoute = pathname.startsWith("/chat/") || isSplitActive;
+  const isSplitLayoutActive = !isPrivacyRoute && isSplitActive;
+  const isChatDetailRoute = !isPrivacyRoute && (pathname.startsWith("/chat/") || isSplitActive);
 
   // Persist split sessions to localStorage
   useEffect(() => {
@@ -463,13 +482,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   // URL sync: when activeColumn changes, update router
   useEffect(() => {
-    if (isSplitActive && activeColumnId) {
+    if (!isPrivacyRoute && isSplitActive && activeColumnId) {
       const target = `/chat/${activeColumnId}`;
       if (pathname !== target) {
         router.replace(target);
       }
     }
-  }, [isSplitActive, activeColumnId, pathname, router]);
+  }, [isPrivacyRoute, isSplitActive, activeColumnId, pathname, router]);
 
   const setActiveColumn = useCallback((sessionId: string) => {
     setActiveColumnIdRaw(sessionId);
@@ -792,9 +811,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               both live there.
               `data-app-shell` is now on the outer flex-col so
               globals.css can inset the whole window the same way. */}
-          <div className="flex flex-col h-screen overflow-hidden" data-app-shell>
+          <div className="relative isolate flex h-screen flex-col overflow-hidden" data-app-shell>
+            <AppWallpaper />
             <UnifiedTopBar />
-            <UpdateBanner />
+            {!isPrivacyRoute && <UpdateBanner />}
             <div className="flex flex-1 min-h-0 overflow-hidden" data-app-content-row>
               {/* Phase 7c closeout — the left sidebar is now a
                   row-level card, exactly like main / workspace /
@@ -815,7 +835,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   anti-FOUC <head> script before hydration and has no
                   causal link to a layout <div> deep in <body>. See
                   tech-debt #29's resolution for the real cause. */}
-              {chatListOpen && (
+              {chatListOpen && !isPrivacyRoute && (
                 <CardFrame kind="sidebar" width={chatListWidth}>
                   <CardSurface
                     kind="sidebar"
@@ -835,7 +855,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   </CardSurface>
                 </CardFrame>
               )}
-              {chatListOpen && (
+              {chatListOpen && !isPrivacyRoute && (
                 <ResizeGutter
                   onResize={handleChatListResize}
                   onResizeEnd={handleChatListResizeEnd}
@@ -845,7 +865,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   }}
                 />
               )}
-              <ChatContentRow isChatRoute={isChatRoute} isChatDetailRoute={isChatDetailRoute} isSplitActive={isSplitActive}>
+              <ChatContentRow isChatRoute={isChatRoute} isChatDetailRoute={isChatDetailRoute} isSplitActive={isSplitLayoutActive}>
                 {children}
               </ChatContentRow>
             </div>
@@ -866,9 +886,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             && (updateContextValue.updateInfo?.updateAvailable ?? false)
             && <UpdateDialog />}
           {announcementMaybeVisible && <FeatureAnnouncementDialog />}
-          <Toaster />
-          <GlobalSearchDialog open={searchOpen} onOpenChange={setSearchOpen} />
-          {setupOpen && (
+          {!isPrivacyRoute && <Toaster />}
+          {!isPrivacyRoute && <GlobalSearchDialog open={searchOpen} onOpenChange={setSearchOpen} />}
+          {!isPrivacyRoute && setupOpen && (
             <SetupCenter
               onClose={() => setSetupOpen(false)}
               initialCard={setupInitialCard}

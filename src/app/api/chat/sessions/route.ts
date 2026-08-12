@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import path from 'node:path';
-import { getAllSessions, createSession } from '@/lib/db';
+import { getAllSessions, createSession, updateSessionConversationBinding } from '@/lib/db';
+import { getCharacterProfile } from '@/lib/character-store';
 import { sanitizeManualTitle, type TitleOrigin } from '@/lib/conversation-title';
 import type { CreateSessionRequest, SessionsResponse, SessionResponse } from '@/types';
 import { serverErrorResponse } from '@/lib/api-error';
@@ -22,9 +23,11 @@ export async function GET(request: NextRequest) {
     // contract while still letting the Tasks page surface execution
     // sessions for users who want to browse them directly.
     const sourceParam = request.nextUrl.searchParams.get('source');
-    const includeSources: ReadonlyArray<'user' | 'task'> | undefined =
+    const includeSources: ReadonlyArray<'user' | 'task' | 'private'> | undefined =
       sourceParam === 'task'
         ? ['task']
+        : sourceParam === 'private'
+          ? ['private']
         : sourceParam === 'all'
           ? undefined
           : ['user'];
@@ -68,6 +71,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (body.assistant_id !== undefined
+      && (typeof body.assistant_id !== 'string' || !body.assistant_id || !getCharacterProfile(body.assistant_id))) {
+      return Response.json({ error: 'Character not found', code: 'INVALID_CHARACTER' }, { status: 404 });
+    }
+
     // Title is optional and, since the composer stopped sending one, normally
     // absent — the session is created as a placeholder and POST /api/chat
     // derives the fallback from the first real message. A caller that DOES
@@ -92,10 +100,17 @@ export async function POST(request: NextRequest) {
       body.mode,
       body.provider_id,
       body.permission_profile,
-      undefined, // source
+      body.ephemeral ? 'private' : undefined,
       titleOrigin,
     );
-    const response: SessionResponse = { session };
+    if (body.assistant_id) {
+      updateSessionConversationBinding(session.id, { kind: 'character', assistantId: body.assistant_id });
+    }
+    const response: SessionResponse = {
+      session: body.assistant_id
+        ? { ...session, conversation_kind: 'character', assistant_id: body.assistant_id }
+        : session,
+    };
     return Response.json(response, { status: 201 });
   } catch (error) {
     return serverErrorResponse('POST /api/chat/sessions', error);

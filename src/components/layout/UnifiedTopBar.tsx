@@ -30,6 +30,8 @@ import { useTranslation } from "@/hooks/useTranslation";
 import { useClientPlatform } from '@/hooks/useClientPlatform';
 import { copyWithToast } from "@/lib/clipboard";
 import { renameSession } from "@/lib/session-title-events";
+import { PRIVACY_RETURN_PATH_KEY, safePrivacyReturnPath } from '@/lib/privacy-route';
+import { disposePrivateSession, getPrivacySessionId } from '@/lib/privacy-session';
 import type { TranslationKey } from "@/i18n";
 
 export function UnifiedTopBar() {
@@ -59,6 +61,39 @@ export function UnifiedTopBar() {
   // Only show Git/terminal/panel controls on chat detail routes (/chat/[id]),
   // not on the empty /chat page where panels aren't mounted.
   const isChatRoute = pathname.startsWith("/chat/") && pathname !== "/chat";
+  const isPrivacyRoute = pathname === '/privacy';
+
+  const handlePrivacy = useCallback(async () => {
+    if (isPrivacyRoute) {
+      await disposePrivateSession(getPrivacySessionId());
+      const target = safePrivacyReturnPath(sessionStorage.getItem(PRIVACY_RETURN_PATH_KEY));
+      sessionStorage.removeItem(PRIVACY_RETURN_PATH_KEY);
+      router.push(target);
+      return;
+    }
+    const fullPath = pathname + window.location.search + window.location.hash;
+    sessionStorage.setItem(PRIVACY_RETURN_PATH_KEY, fullPath);
+    router.push('/privacy');
+  }, [isPrivacyRoute, pathname, router]);
+
+  const privacyButton = (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant={isPrivacyRoute ? 'secondary' : 'ghost'}
+          size="icon-sm"
+          onClick={handlePrivacy}
+          aria-label={t(isPrivacyRoute ? 'privacy.exit' : 'privacy.enter')}
+          className="text-muted-foreground hover:text-foreground"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          <CodePilotIcon name="permission" size="md" className="text-inherit" aria-hidden />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{t(isPrivacyRoute ? 'privacy.exit' : 'privacy.enter')}</TooltipContent>
+    </Tooltip>
+  );
 
   // Session actions menu (mirrors the chat list's row "..." menu so users
   // get the same set of actions on the active chat from inside the chat
@@ -191,10 +226,11 @@ export function UnifiedTopBar() {
   if (!isChatRoute) {
     return (
       <div
-        className="flex h-10 shrink-0 items-center gap-2 pl-3 bg-[var(--platform-surface-bar)]"
+        className="flex h-10 shrink-0 items-center gap-2 bg-transparent pl-3"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+        data-platform-topbar
       >
-        {sidebarToggleButton}
+        {!isPrivacyRoute && sidebarToggleButton}
         {isSettingsRoute && (
           <Button
             type="button"
@@ -208,6 +244,14 @@ export function UnifiedTopBar() {
             {t("common.back" as TranslationKey)}
           </Button>
         )}
+        <div className="flex-1" />
+        {isPrivacyRoute && (
+          <span className="text-[11px] font-medium tracking-[0.14em] text-muted-foreground/75">
+            {t('privacy.title')}
+          </span>
+        )}
+        {privacyButton}
+        {isWindows && <div style={{ width: 138 }} className="shrink-0" />}
       </div>
     );
   }
@@ -217,12 +261,11 @@ export function UnifiedTopBar() {
   return (
     <>
       <div
-        // bg routed through the platform token (Phase 7b / Phase 2).
-        // Default = `var(--background)` so non-macOS visuals are
-        // identical to the prior `bg-background`. macOS profile drops
-        // alpha so Electron's window vibrancy shows through the bar.
-        className="flex h-10 shrink-0 items-center gap-3 bg-[var(--platform-surface-bar)] px-4"
+        // The title bar is a transparent control layer over the main surface;
+        // the shell below provides the visual material and wallpaper.
+        className="flex h-10 shrink-0 items-center gap-3 bg-transparent px-4"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+        data-platform-topbar
       >
         {/* Reopen-sidebar toggle, only present when the user collapsed
             the left nav. Pairs with the collapse button inside
@@ -328,6 +371,7 @@ export function UnifiedTopBar() {
           className="flex items-center gap-1"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
+          {privacyButton}
           {/* Branch label — informational only (no longer a toggle since
               Git lives inside the Workspace Sidebar). Click jumps to the
               Git Tab; the assistant-buddy avatar is gone with the same

@@ -1104,12 +1104,11 @@ export function MessageInput({
   const currentModelValue = modelName || 'sonnet';
   const chatStatus: ChatStatus = isStreaming ? 'streaming' : 'ready';
 
-  // Composer shell bg routed through the platform token (Phase 7b /
-  // Phase 2). Default = `var(--background)` matches prior
-  // `bg-background/80`; macOS profile drops alpha so vibrancy shows
-  // through the composer hood.
+  // Keep the spacing shell transparent so the wallpaper/main surface remains
+  // continuous. The actual rounded InputGroup below still owns the visual
+  // treatment for the composer itself.
   return (
-    <div className="bg-[var(--platform-surface-bar)] backdrop-blur-lg px-4 pt-2 pb-1">
+    <div className="bg-transparent px-4 pt-2 pb-1">
       <div className="mx-auto w-full max-w-3xl">
         <div className="relative">
           {/* Slash Command / File Popover */}

@@ -389,6 +389,31 @@ html.dark[data-platform="darwin"][data-shell="electron"][data-platform-style="au
     @apply bg-background text-foreground;
   }
 
+  /* User wallpaper keeps the interface readable by turning the major work
+     surfaces into frosted layers. Without this scoped override the opaque
+     bg-background utility hides the wallpaper completely. */
+  html[data-wallpaper="active"] {
+    /* Keep the three shell cards visually related over a wallpaper. The
+       previous 86% main-content fill made the center card noticeably more
+       opaque than the sidebar (72%), which broke the shared floating-card
+       treatment. */
+    --platform-wallpaper-card-alpha: 72%;
+  }
+  html[data-wallpaper="active"] [data-platform-main-content],
+  html[data-wallpaper="active"] [data-platform-file-tree],
+  html[data-wallpaper="active"] [data-platform-assistant],
+  html[data-wallpaper="active"] [data-workspace-sidebar] {
+    background-color: color-mix(in oklch, var(--background) var(--platform-wallpaper-card-alpha), transparent) !important;
+    backdrop-filter: blur(24px) saturate(1.2);
+    -webkit-backdrop-filter: blur(24px) saturate(1.2);
+  }
+  html[data-wallpaper="active"] [data-platform-sidebar] {
+    --platform-surface-sidebar: color-mix(in oklch, var(--sidebar) var(--platform-wallpaper-card-alpha), transparent);
+  }
+  html[data-wallpaper="active"] [data-app-shell] {
+    --platform-surface-bar: color-mix(in oklch, var(--background) var(--platform-wallpaper-card-alpha), transparent);
+  }
+
   /* macOS profile lets Electron `vibrancy: 'sidebar'` actually surface
      in the UI. Without making body transparent, the opaque
      `bg-background` covers the vibrancy material the same way the
@@ -486,6 +511,16 @@ html.dark[data-platform="darwin"][data-shell="electron"][data-platform-style="au
     width: 100%;
     height: 100%;
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  }
+  /* The title bar is a transparent control layer over the shell. Keep its
+     controls directly on the wallpaper/main surface instead of creating a
+     second floating strip above the cards below it. */
+  html[data-platform="darwin"][data-shell="electron"][data-platform-style="auto"] [data-platform-topbar] {
+    background: transparent;
+    border-radius: 0;
+    clip-path: none;
+    isolation: auto;
+    box-shadow: none;
   }
   html.dark[data-platform="darwin"][data-shell="electron"][data-platform-style="auto"] [data-platform-sidebar],
   html.dark[data-platform="darwin"][data-shell="electron"][data-platform-style="auto"] [data-workspace-sidebar],

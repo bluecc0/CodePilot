@@ -10,6 +10,7 @@ import { TerminalReasonChip } from './TerminalReasonChip';
 import { RateLimitBanner } from './RateLimitBanner';
 import { MessageInput } from './MessageInput';
 import { ChatComposerActionBar } from './ChatComposerActionBar';
+import { CharacterSelector } from '@/components/characters/CharacterSelector';
 import { ModeIndicator } from './ModeIndicator';
 import { RuntimeSelector } from './RuntimeSelector';
 import type { ChatRuntime } from '@/lib/chat-runtime-shared';
@@ -88,6 +89,7 @@ interface ChatViewProps {
    * cascade. Empty / undefined = "follow global" (today's behavior).
    */
   runtimePin?: string;
+  assistantId?: string;
   initialPermissionProfile?: SessionPermissionProfile;
   initialMode?: 'code' | 'plan';
   initialHasSummary?: boolean;
@@ -106,7 +108,7 @@ const CONFIRM_REQUIRED = new Set<import('./TerminalReasonChip').TerminalActionId
   'retry_simple',
 ]);
 
-export function ChatView({ sessionId, initialMessages = [], initialHasMore = false, modelName, providerId, runtimePin: initialRuntimePin, initialPermissionProfile, initialMode, initialHasSummary }: ChatViewProps) {
+export function ChatView({ sessionId, initialMessages = [], initialHasMore = false, modelName, providerId, runtimePin: initialRuntimePin, assistantId: initialAssistantId, initialPermissionProfile, initialMode, initialHasSummary }: ChatViewProps) {
   const { setStreamingSessionId, workingDirectory, setPendingApprovalSessionId, setFileTreeOpen, setIsAssistantWorkspace } = usePanel();
   const { t } = useTranslation();
   const router = useRouter();
@@ -239,6 +241,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
   const [thinkingMode, setThinkingMode] = useState<string>('adaptive');
   const [context1m, setContext1m] = useState(false);
   const [hasSummary, setHasSummary] = useState(initialHasSummary || false);
+  const [assistantId, setAssistantId] = useState(initialAssistantId || '');
 
   // Sync model/provider when session data loads. providerId='' is a
   // valid env-mode session value (Codex P1 review) — guard with
@@ -246,6 +249,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
   // overwrite a localStorage-seeded non-empty currentProviderId.
   useEffect(() => { if (modelName) setCurrentModel(modelName); }, [modelName]);
   useEffect(() => { if (providerId !== undefined) setCurrentProviderId(providerId); }, [providerId]);
+  useEffect(() => { setAssistantId(initialAssistantId || ''); }, [initialAssistantId]);
 
   // Phase 2 Step 4c — `runtime_pin` becomes local state so the composer
   // toolbar's RuntimeSelector can write through to it without waiting
@@ -731,6 +735,24 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
     }).catch(() => {});
   }, [sessionId, runtimePin, messages, cappedSetMessages]);
 
+  const handleAssistantChange = useCallback(async (nextAssistantId: string) => {
+    const previous = assistantId;
+    setAssistantId(nextAssistantId);
+    try {
+      const response = await fetch(`/api/chat/sessions/${sessionId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assistant_id: nextAssistantId }),
+      });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Failed to change character');
+    } catch (error) {
+      setAssistantId(previous);
+      import('@/hooks/useToast').then(({ showToast }) => showToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Failed to change character',
+      }));
+    }
+  }, [assistantId, sessionId]);
+
   // ── Extracted hooks ──
 
   const handleStreamCompleted = useCallback((phase: string) => {
@@ -1161,6 +1183,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
         mode,
         model: sendModel,
         providerId: sendProviderId,
+        assistantId: assistantId || undefined,
         files,
         workingDirectory,
         systemPromptAppend,
@@ -1187,7 +1210,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
       });
       return true;
     },
-    [sessionId, mode, currentModel, currentProviderId, selectedEffort, context1m, buildThinkingConfig, handleModeChange, noCompatibleProvider, providerFetchState, resolvedProviderId, resolvedModel, sessionProviderRuntimeIncompatible]
+    [sessionId, mode, currentModel, currentProviderId, assistantId, selectedEffort, context1m, buildThinkingConfig, handleModeChange, noCompatibleProvider, providerFetchState, resolvedProviderId, resolvedModel, sessionProviderRuntimeIncompatible]
   );
 
   const sendMessage = useCallback(
@@ -1484,7 +1507,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
               runtime={sessionRuntimeParam}
               onProviderModelChange={handleProviderModelChange}
               workingDirectory={workingDirectory}
-              onAssistantTrigger={checkAssistantTrigger}
+              onAssistantTrigger={assistantId ? undefined : checkAssistantTrigger}
               effort={selectedEffort}
               onEffortChange={setSelectedEffort}
               sdkInitMeta={initMetaRef.current}
@@ -1497,6 +1520,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
             <ChatComposerActionBar
               left={
                 <>
+                  <CharacterSelector value={assistantId} onChange={handleAssistantChange} disabled={isStreaming || messages.length > 0} />
                   <ModeIndicator mode={mode} onModeChange={handleModeChange} disabled={isStreaming} />
                   <RuntimeSelector
                     runtimePin={runtimePin}
@@ -1762,7 +1786,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
         runtime={sessionRuntimeParam}
         onProviderModelChange={handleProviderModelChange}
         workingDirectory={workingDirectory}
-        onAssistantTrigger={checkAssistantTrigger}
+        onAssistantTrigger={assistantId ? undefined : checkAssistantTrigger}
         effort={selectedEffort}
         onEffortChange={setSelectedEffort}
         sdkInitMeta={initMetaRef.current}
@@ -1775,6 +1799,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
       <ChatComposerActionBar
         left={
           <>
+            <CharacterSelector value={assistantId} onChange={handleAssistantChange} disabled={isStreaming || messages.length > 0} />
             <ModeIndicator mode={mode} onModeChange={handleModeChange} disabled={isStreaming} />
             <RuntimeSelector
               runtimePin={runtimePin}

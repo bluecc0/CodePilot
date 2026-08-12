@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
-import { deleteSession, getSession, updateSessionWorkingDirectory, updateSessionTitle, updateSessionMode, updateSessionModel, updateSessionProviderId, clearSessionMessages, updateSdkSessionId, updateSessionPermissionProfile, updateSessionRuntime } from '@/lib/db';
+import { deleteSession, getSession, updateSessionWorkingDirectory, updateSessionTitle, updateSessionMode, updateSessionModel, updateSessionProviderId, clearSessionMessages, updateSdkSessionId, updateSessionPermissionProfile, updateSessionRuntime, updateSessionConversationBinding, sessionHasMessages } from '@/lib/db';
+import { getCharacterProfile } from '@/lib/character-store';
 import { sanitizeManualTitle } from '@/lib/conversation-title';
 import { autoApprovePendingForSession } from '@/lib/bridge/permission-broker';
 import { clearRuntimeSessionRef } from '@/lib/runtime/session-store';
@@ -37,6 +38,26 @@ export async function PATCH(
     }
 
     const body = await request.json();
+
+    if (body.assistant_id !== undefined) {
+      if (session.conversation_kind === 'group') {
+        return Response.json({ error: 'Group sessions cannot be converted to single-character chats', code: 'GROUP_SESSION_LOCKED' }, { status: 409 });
+      }
+      if (sessionHasMessages(id)) {
+        return Response.json({ error: 'Character can only be changed before the first message', code: 'CHARACTER_LOCKED' }, { status: 409 });
+      }
+      if (typeof body.assistant_id !== 'string') {
+        return Response.json({ error: 'assistant_id must be a string', code: 'INVALID_CHARACTER' }, { status: 400 });
+      }
+      if (body.assistant_id && !getCharacterProfile(body.assistant_id)) {
+        return Response.json({ error: 'Character not found', code: 'INVALID_CHARACTER' }, { status: 404 });
+      }
+      updateSessionConversationBinding(id, body.assistant_id
+        ? { kind: 'character', assistantId: body.assistant_id }
+        : { kind: 'single' });
+      clearRuntimeSessionRef(id, 'claude_code');
+      clearRuntimeSessionRef(id, 'codex_runtime');
+    }
 
     if (body.working_directory) {
       const workingDirectory = typeof body.working_directory === 'string'

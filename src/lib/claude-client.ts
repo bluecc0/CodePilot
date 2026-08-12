@@ -18,6 +18,7 @@ import type { ClaudeStreamOptions, SSEEvent, TokenUsage, MCPServerConfig, Permis
 import { isImageFile } from '@/types';
 import { pickModelUsage } from './sdk-model-usage';
 import { registerPendingPermission, buildPermissionResolvedEvent } from './permission-registry';
+import { promptNeedsMediaMcp } from './media-intent';
 import { registerConversation, unregisterConversation } from './conversation-registry';
 import { captureCapabilities, isCacheFresh, setCachedPlugins } from './agent-sdk-capabilities';
 import { normalizeMessageContent, microCompactMessage } from './message-normalizer';
@@ -1454,14 +1455,7 @@ export function streamClaudeSdk(options: ClaudeStreamOptions): ReadableStream<st
         // Codex P1 — heartbeat never needs media tools; skip even
         // before keyword evaluation so a HEARTBEAT.md mentioning the
         // word "图片" can't accidentally pull the MCP in.
-        const needsMediaMcp = !isHeartbeatMode && (() => {
-          const mediaKeywords = /生成图片|画一|图像|图片|素材|保存.*素材|import.*library|save.*library|codepilot_import_media|codepilot_generate_image/i;
-          if (mediaKeywords.test(prompt)) return true;
-          if (conversationHistory?.some(m =>
-            mediaKeywords.test(m.content)
-          )) return true;
-          return false;
-        })();
+        const needsMediaMcp = !isHeartbeatMode && promptNeedsMediaMcp(prompt, conversationHistory);
 
         if (needsMediaMcp) {
           const { createMediaImportMcpServer } = await import('@/lib/media-import-mcp');
