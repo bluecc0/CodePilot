@@ -32,7 +32,10 @@ import { FolderPicker } from "@/components/chat/FolderPicker";
 import { useAssistantWorkspace } from "@/hooks/useAssistantWorkspace";
 import { AssistantPromoCard } from "@/components/chat/ChatEmptyState";
 import { AssistantChatPicker } from "./AssistantChatPicker";
-import { EmptyChatCleanupAction } from "./EmptyChatCleanupAction";
+import {
+  EmptyChatCleanupAction,
+  type EmptyChatCleanupTarget,
+} from "./EmptyChatCleanupAction";
 import {
   formatRelativeTime,
   groupSessionsByProject,
@@ -72,6 +75,7 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
   );
   const [hoveredFolder, setHoveredFolder] = useState<string | null>(null);
   const [creatingChat, setCreatingChat] = useState(false);
+  const [emptyChatCleanupProject, setEmptyChatCleanupProject] = useState<EmptyChatCleanupTarget | null>(null);
   // Codex-style sectioned sidebar: separate 项目 (non-assistant) and 助理 (assistant flat list)
   const [projectsCollapsed, setProjectsCollapsed] = useState(false);
   const [assistantCollapsed, setAssistantCollapsed] = useState(false);
@@ -393,6 +397,10 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
     window.dispatchEvent(new CustomEvent('session-updated'));
   }, [pathname, removeManyFromSplit, router, splitSessions]);
 
+  const closeEmptyChatCleanup = useCallback(() => {
+    setEmptyChatCleanupProject(null);
+  }, []);
+
   const handleCreateSessionInProject = async (
     e: React.MouseEvent,
     workingDirectory: string
@@ -525,8 +533,6 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
               ⌘K
             </kbd>
           </Button>
-
-          <EmptyChatCleanupAction onDeleted={handleEmptyChatsDeleted} />
 
           {/* Feature pages */}
           {navItems.map((item) => {
@@ -663,6 +669,9 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
                             onMouseEnter={() => setHoveredFolder(group.workingDirectory)}
                             onMouseLeave={() => setHoveredFolder(null)}
                             onCreateSession={(e) => handleCreateSessionInProject(e, group.workingDirectory)}
+                            onCleanupEmptyChats={(workingDirectory, displayName) => {
+                              setEmptyChatCleanupProject({ workingDirectory, displayName });
+                            }}
                             onRemoveProject={handleRemoveProject}
                           />
 
@@ -898,6 +907,12 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
         open={folderPickerOpen}
         onOpenChange={setFolderPickerOpen}
         onSelect={handleFolderSelect}
+      />
+
+      <EmptyChatCleanupAction
+        target={emptyChatCleanupProject}
+        onClose={closeEmptyChatCleanup}
+        onDeleted={handleEmptyChatsDeleted}
       />
 
     </div>

@@ -43,6 +43,7 @@ interface ProjectGroupHeaderProps {
   onMouseEnter: () => void;
   onMouseLeave: () => void;
   onCreateSession: (e: React.MouseEvent) => void;
+  onCleanupEmptyChats?: (workingDirectory: string, displayName: string) => void;
   onRemoveProject?: (workingDirectory: string) => void;
   assistantName?: string;
   assistantMemoryCount?: number;
@@ -64,6 +65,7 @@ export function ProjectGroupHeader({
   onMouseEnter,
   onMouseLeave,
   onCreateSession,
+  onCleanupEmptyChats,
   onRemoveProject,
   assistantName,
   assistantMemoryCount,
@@ -117,6 +119,14 @@ export function ProjectGroupHeader({
             <CodePilotIcon name="copy" size="sm" aria-hidden />
             <span>{t('chatList.copyFolderPath' as TranslationKey)}</span>
           </ContextMenuItem>
+          {onCleanupEmptyChats && (
+            <ContextMenuItem
+              onSelect={() => onCleanupEmptyChats(workingDirectory, displayName)}
+            >
+              <CodePilotIcon name="delete" size="sm" aria-hidden />
+              <span>{t('chatList.cleanupEmpty')}</span>
+            </ContextMenuItem>
+          )}
           {onRemoveProject && !isWorkspace && (
             <>
               <ContextMenuSeparator />
@@ -176,6 +186,14 @@ export function ProjectGroupHeader({
             <CodePilotIcon name="copy" size="sm" aria-hidden />
             <span>{t('chatList.copyFolderPath' as TranslationKey)}</span>
           </DropdownMenuItem>
+          {onCleanupEmptyChats && (
+            <DropdownMenuItem
+              onClick={() => onCleanupEmptyChats(workingDirectory, displayName)}
+            >
+              <CodePilotIcon name="delete" size="sm" aria-hidden />
+              <span>{t('chatList.cleanupEmpty')}</span>
+            </DropdownMenuItem>
+          )}
           {onRemoveProject && !isWorkspace && (
             <>
               <DropdownMenuSeparator />

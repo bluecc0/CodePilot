@@ -1,6 +1,8 @@
 import '../db-isolation.setup';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { NextRequest } from 'next/server';
 import {
   addMessage,
   closeDb,
@@ -18,10 +20,20 @@ import {
 
 after(() => closeDb());
 
-test('bulk cleanup only removes idle, unbound user placeholders with no messages', async () => {
+function cleanupRequest(workingDirectory?: string, method = 'GET') {
+  const url = new URL('http://localhost/api/chat/sessions/empty');
+  if (workingDirectory !== undefined) {
+    url.searchParams.set('workingDirectory', workingDirectory);
+  }
+  return new NextRequest(url, { method });
+}
+
+test('project cleanup only removes idle, unbound user placeholders with no messages in that project', async () => {
   const wd = process.cwd();
+  const otherWd = path.join(wd, 'another-project');
   const emptyA = createSession(undefined, undefined, undefined, wd, 'code');
   const emptyB = createSession(undefined, undefined, undefined, wd, 'code');
+  const otherProjectEmpty = createSession(undefined, undefined, undefined, otherWd, 'code');
 
   const withMessage = createSession(undefined, undefined, undefined, wd, 'code');
   addMessage(withMessage.id, 'user', 'This conversation is real');
@@ -60,23 +72,25 @@ test('bulk cleanup only removes idle, unbound user placeholders with no messages
   `).run('outbound-placeholder', remotelyBoundPlaceholder.id);
 
   assert.deepEqual(
-    new Set(listEmptyPlaceholderSessionIds()),
+    new Set(listEmptyPlaceholderSessionIds(wd)),
     new Set([emptyA.id, emptyB.id]),
   );
+  assert.deepEqual(listEmptyPlaceholderSessionIds(otherWd), [otherProjectEmpty.id]);
 
-  const preview = await previewEmptySessionsRoute();
+  const preview = await previewEmptySessionsRoute(cleanupRequest(wd));
   assert.equal(preview.status, 200);
   const previewBody = await preview.json() as { count: number; sessionIds: string[] };
   assert.equal(previewBody.count, 2);
   assert.deepEqual(new Set(previewBody.sessionIds), new Set([emptyA.id, emptyB.id]));
 
-  const deletion = await deleteEmptySessionsRoute();
+  const deletion = await deleteEmptySessionsRoute(cleanupRequest(wd, 'DELETE'));
   assert.equal(deletion.status, 200);
   const deletionBody = await deletion.json() as { deletedCount: number; sessionIds: string[] };
   assert.equal(deletionBody.deletedCount, 2);
   assert.deepEqual(new Set(deletionBody.sessionIds), new Set([emptyA.id, emptyB.id]));
   assert.equal(getSession(emptyA.id), undefined);
   assert.equal(getSession(emptyB.id), undefined);
+  assert.ok(getSession(otherProjectEmpty.id), 'an empty conversation from another project must be preserved');
   for (const protectedSession of [
     withMessage,
     manuallyNamedNewChat,
@@ -91,19 +105,28 @@ test('bulk cleanup only removes idle, unbound user placeholders with no messages
     assert.ok(getSession(protectedSession.id), `${protectedSession.id} must be preserved`);
   }
 
-  assert.deepEqual(deleteEmptyPlaceholderSessions(), [], 'a second cleanup is idempotent');
+  assert.deepEqual(deleteEmptyPlaceholderSessions(wd), [], 'a second cleanup is idempotent');
 });
 
 test('DELETE rechecks eligibility after the preview-confirmation gap', async () => {
-  const session = createSession(undefined, undefined, undefined, process.cwd(), 'code');
-  const preview = await previewEmptySessionsRoute();
+  const wd = process.cwd();
+  const session = createSession(undefined, undefined, undefined, wd, 'code');
+  const preview = await previewEmptySessionsRoute(cleanupRequest(wd));
   const previewBody = await preview.json() as { sessionIds: string[] };
   assert.ok(previewBody.sessionIds.includes(session.id));
 
   addMessage(session.id, 'user', 'arrived while the confirmation dialog was open');
 
-  const deletion = await deleteEmptySessionsRoute();
+  const deletion = await deleteEmptySessionsRoute(cleanupRequest(wd, 'DELETE'));
   const deletionBody = await deletion.json() as { sessionIds: string[] };
   assert.equal(deletionBody.sessionIds.includes(session.id), false);
   assert.ok(getSession(session.id), 'a conversation that became active must remain');
+});
+
+test('cleanup API rejects requests without an absolute project path', async () => {
+  const missing = await previewEmptySessionsRoute(cleanupRequest());
+  assert.equal(missing.status, 400);
+
+  const relative = await deleteEmptySessionsRoute(cleanupRequest('relative/project', 'DELETE'));
+  assert.equal(relative.status, 400);
 });

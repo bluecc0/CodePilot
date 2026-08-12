@@ -2231,10 +2231,16 @@ const EMPTY_PLACEHOLDER_SESSION_PREDICATE = `
   )
 `;
 
-export function listEmptyPlaceholderSessionIds(): string[] {
+export function listEmptyPlaceholderSessionIds(workingDirectory: string): string[] {
+  if (!workingDirectory) return [];
   const rows = getDb()
-    .prepare(`SELECT id FROM chat_sessions WHERE ${EMPTY_PLACEHOLDER_SESSION_PREDICATE} ORDER BY updated_at DESC, id ASC`)
-    .all(PLACEHOLDER_TITLE) as Array<{ id: string }>;
+    .prepare(`
+      SELECT id FROM chat_sessions
+      WHERE working_directory = ?
+        AND ${EMPTY_PLACEHOLDER_SESSION_PREDICATE}
+      ORDER BY updated_at DESC, id ASC
+    `)
+    .all(workingDirectory, PLACEHOLDER_TITLE) as Array<{ id: string }>;
   return rows.map(row => row.id);
 }
 
@@ -2243,20 +2249,31 @@ export function listEmptyPlaceholderSessionIds(): string[] {
  * predicate. The predicate is rechecked on DELETE so a chat that receives a
  * first message after the preview request cannot be removed by confirmation.
  */
-export function deleteEmptyPlaceholderSessions(): string[] {
+export function deleteEmptyPlaceholderSessions(workingDirectory: string): string[] {
+  if (!workingDirectory) return [];
   const db = getDb();
   const selectCandidates = db.prepare(
-    `SELECT id FROM chat_sessions WHERE ${EMPTY_PLACEHOLDER_SESSION_PREDICATE} ORDER BY updated_at DESC, id ASC`,
+    `
+      SELECT id FROM chat_sessions
+      WHERE working_directory = ?
+        AND ${EMPTY_PLACEHOLDER_SESSION_PREDICATE}
+      ORDER BY updated_at DESC, id ASC
+    `,
   );
   const deleteCandidate = db.prepare(
-    `DELETE FROM chat_sessions WHERE id = ? AND ${EMPTY_PLACEHOLDER_SESSION_PREDICATE}`,
+    `
+      DELETE FROM chat_sessions
+      WHERE id = ?
+        AND working_directory = ?
+        AND ${EMPTY_PLACEHOLDER_SESSION_PREDICATE}
+    `,
   );
 
   const cleanup = db.transaction(() => {
-    const candidates = selectCandidates.all(PLACEHOLDER_TITLE) as Array<{ id: string }>;
+    const candidates = selectCandidates.all(workingDirectory, PLACEHOLDER_TITLE) as Array<{ id: string }>;
     const deletedIds: string[] = [];
     for (const candidate of candidates) {
-      const result = deleteCandidate.run(candidate.id, PLACEHOLDER_TITLE);
+      const result = deleteCandidate.run(candidate.id, workingDirectory, PLACEHOLDER_TITLE);
       if (result.changes > 0) deletedIds.push(candidate.id);
     }
     return deletedIds;

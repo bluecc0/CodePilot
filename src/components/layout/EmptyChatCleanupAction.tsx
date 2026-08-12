@@ -1,8 +1,6 @@
 'use client';
 
-import { useState } from 'react';
-import { Button } from '@/components/ui/button';
-import { CodePilotIcon } from '@/components/ui/semantic-icon';
+import { useEffect, useState } from 'react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -16,7 +14,14 @@ import {
 import { showToast } from '@/hooks/useToast';
 import { useTranslation } from '@/hooks/useTranslation';
 
+export interface EmptyChatCleanupTarget {
+  workingDirectory: string;
+  displayName: string;
+}
+
 interface EmptyChatCleanupActionProps {
+  target: EmptyChatCleanupTarget | null;
+  onClose: () => void;
   onDeleted: (sessionIds: string[]) => void;
 }
 
@@ -25,44 +30,55 @@ interface CleanupPreview {
   sessionIds?: unknown;
 }
 
-export function EmptyChatCleanupAction({ onDeleted }: EmptyChatCleanupActionProps) {
+export function EmptyChatCleanupAction({ target, onClose, onDeleted }: EmptyChatCleanupActionProps) {
   const { t } = useTranslation();
-  const [checking, setChecking] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [candidateCount, setCandidateCount] = useState(0);
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [candidateCount, setCandidateCount] = useState<number | null>(null);
 
-  const previewCleanup = async () => {
-    if (checking || deleting) return;
-    setChecking(true);
-    try {
-      const response = await fetch('/api/chat/sessions/empty');
-      const data = await response.json().catch(() => ({})) as CleanupPreview;
-      if (!response.ok || typeof data.count !== 'number') throw new Error('Invalid cleanup preview');
-      if (data.count === 0) {
-        showToast({ type: 'info', message: t('chatList.cleanupEmptyNone') });
-        return;
-      }
-      setCandidateCount(data.count);
-      setConfirmOpen(true);
-    } catch {
-      showToast({ type: 'error', message: t('chatList.cleanupEmptyFailed') });
-    } finally {
-      setChecking(false);
+  useEffect(() => {
+    if (!target) {
+      setCandidateCount(null);
+      return;
     }
-  };
+
+    const controller = new AbortController();
+    const previewCleanup = async () => {
+      setCandidateCount(null);
+      try {
+        const params = new URLSearchParams({ workingDirectory: target.workingDirectory });
+        const response = await fetch(`/api/chat/sessions/empty?${params}`, {
+          signal: controller.signal,
+        });
+        const data = await response.json().catch(() => ({})) as CleanupPreview;
+        if (!response.ok || typeof data.count !== 'number') throw new Error('Invalid cleanup preview');
+        if (data.count === 0) {
+          showToast({ type: 'info', message: t('chatList.cleanupEmptyNone') });
+          onClose();
+          return;
+        }
+        setCandidateCount(data.count);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        showToast({ type: 'error', message: t('chatList.cleanupEmptyFailed') });
+        onClose();
+      }
+    };
+
+    void previewCleanup();
+    return () => controller.abort();
+  }, [onClose, t, target]);
 
   const confirmCleanup = async () => {
-    if (deleting) return;
+    if (!target || deleting) return;
     setDeleting(true);
     try {
-      const response = await fetch('/api/chat/sessions/empty', { method: 'DELETE' });
+      const params = new URLSearchParams({ workingDirectory: target.workingDirectory });
+      const response = await fetch(`/api/chat/sessions/empty?${params}`, { method: 'DELETE' });
       const data = await response.json().catch(() => ({})) as CleanupPreview & { deletedCount?: unknown };
       if (!response.ok || typeof data.deletedCount !== 'number' || !Array.isArray(data.sessionIds)) {
         throw new Error('Invalid cleanup response');
       }
       const sessionIds = data.sessionIds.filter((id): id is string => typeof id === 'string');
-      setConfirmOpen(false);
       onDeleted(sessionIds);
       showToast({
         type: data.deletedCount > 0 ? 'success' : 'info',
@@ -70,6 +86,7 @@ export function EmptyChatCleanupAction({ onDeleted }: EmptyChatCleanupActionProp
           ? t('chatList.cleanupEmptySuccess', { count: data.deletedCount })
           : t('chatList.cleanupEmptyNone'),
       });
+      onClose();
     } catch {
       showToast({ type: 'error', message: t('chatList.cleanupEmptyFailed') });
     } finally {
@@ -78,35 +95,19 @@ export function EmptyChatCleanupAction({ onDeleted }: EmptyChatCleanupActionProp
   };
 
   return (
-    <>
-      <Button
-        variant="ghost"
-        size="sm"
-        className="group h-9 w-full justify-start gap-2 rounded-xl px-3 text-[13px] font-normal text-sidebar-foreground"
-        disabled={checking || deleting}
-        onClick={() => void previewCleanup()}
-        title={t('chatList.cleanupEmpty')}
-      >
-        <CodePilotIcon
-          name={checking ? 'loading' : 'delete'}
-          size="md"
-          className={checking ? 'animate-spin text-inherit' : 'text-inherit'}
-          aria-hidden
-        />
-        {checking ? t('chatList.cleanupEmptyChecking') : t('chatList.cleanupEmpty')}
-      </Button>
-
-      <AlertDialog
-        open={confirmOpen}
-        onOpenChange={(open) => {
-          if (!deleting) setConfirmOpen(open);
-        }}
-      >
+    <AlertDialog
+      open={target !== null && candidateCount !== null}
+      onOpenChange={(open) => {
+        if (!open && !deleting) onClose();
+      }}
+    >
         <AlertDialogContent size="sm">
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('chatList.cleanupEmptyDialogTitle')}</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t('chatList.cleanupEmptyDialogTitle', { project: target?.displayName || '' })}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              {t('chatList.cleanupEmptyDialogDescription', { count: candidateCount })}
+              {t('chatList.cleanupEmptyDialogDescription', { count: candidateCount || 0 })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -123,7 +124,6 @@ export function EmptyChatCleanupAction({ onDeleted }: EmptyChatCleanupActionProp
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
-      </AlertDialog>
-    </>
+    </AlertDialog>
   );
 }
