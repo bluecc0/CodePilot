@@ -66,6 +66,8 @@ test('persists characters, ordered group members, durable run, and speaker metad
   assert.equal(deleteAssistantGroup(group.id), true);
   assert.equal(listAssistantGroups().some(item => item.id === group.id), false);
   assert.equal(getAssistantGroup(group.id)?.name, 'Review board', 'soft deletion must preserve historical group resolution');
+  assert.equal(deleteCharacterProfile(analyst.id), true, 'deleted groups must not block character cleanup');
+  assert.deepEqual(getAssistantGroup(group.id)?.members?.map(member => member.assistant?.name), ['Critic']);
 });
 
 test('validates group members and rejects client-owned storage fields', () => {

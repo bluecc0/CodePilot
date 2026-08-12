@@ -155,7 +155,29 @@ export function updateCharacterProfile(profileId: string, input: Partial<Charact
 }
 
 export function deleteCharacterProfile(profileId: string): boolean {
-  return getDb().prepare('DELETE FROM assistant_profiles WHERE id = ?').run(profileId).changes > 0;
+  const db = getDb();
+  return db.transaction(() => {
+    // A deleted group remains as a historical anchor for old sessions, but it
+    // is no longer a live owner of its character memberships. Remove those
+    // stale join rows before deleting the profile; otherwise the FK on
+    // assistant_group_members.assistant_id blocks deletion forever while the
+    // UI correctly reports zero active groups.
+    const activeReference = db.prepare(`
+      SELECT gm.group_id
+      FROM assistant_group_members gm
+      JOIN assistant_groups ag ON ag.id = gm.group_id
+      WHERE gm.assistant_id = ? AND ag.deleted_at IS NULL
+      LIMIT 1
+    `).get(profileId) as { group_id: string } | undefined;
+    if (activeReference) throw new Error('Character is still used by an active group');
+
+    db.prepare(`
+      DELETE FROM assistant_group_members
+      WHERE assistant_id = ?
+        AND group_id IN (SELECT id FROM assistant_groups WHERE deleted_at IS NOT NULL)
+    `).run(profileId);
+    return db.prepare('DELETE FROM assistant_profiles WHERE id = ?').run(profileId).changes > 0;
+  })();
 }
 
 export function listAssistantGroups(): AssistantGroup[] {
