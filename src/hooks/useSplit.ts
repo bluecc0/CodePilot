@@ -16,6 +16,7 @@ export interface SplitContextValue {
   isSplitActive: boolean;
   addToSplit: (session: SplitSession) => void;
   removeFromSplit: (sessionId: string) => void;
+  removeManyFromSplit: (sessionIds: readonly string[]) => void;
   setActiveColumn: (sessionId: string) => void;
   exitSplit: () => void;
   isInSplit: (sessionId: string) => boolean;

@@ -539,6 +539,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  const removeManyFromSplit = useCallback((removeIds: readonly string[]) => {
+    if (removeIds.length === 0) return;
+    const removed = new Set(removeIds);
+    setSplitSessions((prev) => {
+      const next = prev.filter((session) => !removed.has(session.sessionId));
+      if (next.length <= 1) {
+        if (next.length === 1) pendingNavigateRef.current = next[0].sessionId;
+        setActiveColumnIdRaw(next[0]?.sessionId || '');
+        return [];
+      }
+      setActiveColumnIdRaw((currentActive) => (
+        removed.has(currentActive) ? next[0].sessionId : currentActive
+      ));
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     if (pendingNavigateRef.current) {
       const target = pendingNavigateRef.current;
@@ -583,11 +600,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       isSplitActive,
       addToSplit,
       removeFromSplit,
+      removeManyFromSplit,
       setActiveColumn,
       exitSplit,
       isInSplit,
     }),
-    [splitSessions, activeColumnId, isSplitActive, addToSplit, removeFromSplit, setActiveColumn, exitSplit, isInSplit]
+    [splitSessions, activeColumnId, isSplitActive, addToSplit, removeFromSplit, removeManyFromSplit, setActiveColumn, exitSplit, isInSplit]
   );
 
   // Warn before closing window/tab while any session is streaming

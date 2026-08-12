@@ -151,12 +151,15 @@ describe('title generation uses the isolated path', () => {
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     assert.match(code, /isolate: true/);
     assert.match(code, /reasoningPolicy: callProfile\.reasoningPolicy/);
-    assert.match(code, /maxOutputTokens: callProfile\.maxOutputTokens/);
-    assert.match(code, /timeoutMs: callProfile\.timeoutMs/);
     assert.match(
       code,
-      /setTimeout\(\(\) => controller\.abort\(\), callProfile\.timeoutMs\)/,
-      'the orchestrator timeout must use the same provider profile as the SDK call',
+      /maxOutputTokens: maxOutputTokens \?\? callProfile\.maxOutputTokens/,
+    );
+    assert.match(code, /timeoutMs: timeoutMs \?\? callProfile\.timeoutMs/);
+    assert.match(
+      code,
+      /setTimeout\(\(\) => controller\.abort\(\), timeoutMs\)/,
+      'the orchestrator and SDK call must use the same resolved timeout',
     );
     // The old, ineffective isolation must not come back.
     assert.ok(!/disableMcp|disableThinking/.test(code), 'superseded flags must be gone');

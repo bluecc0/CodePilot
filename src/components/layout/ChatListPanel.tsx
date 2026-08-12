@@ -31,6 +31,8 @@ import { ProjectGroupHeader } from "./ProjectGroupHeader";
 import { FolderPicker } from "@/components/chat/FolderPicker";
 import { useAssistantWorkspace } from "@/hooks/useAssistantWorkspace";
 import { AssistantPromoCard } from "@/components/chat/ChatEmptyState";
+import { AssistantChatPicker } from "./AssistantChatPicker";
+import { EmptyChatCleanupAction } from "./EmptyChatCleanupAction";
 import {
   formatRelativeTime,
   groupSessionsByProject,
@@ -54,7 +56,7 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
   const pathname = usePathname();
   const router = useRouter();
   const { streamingSessionId, pendingApprovalSessionId, activeStreamingSessions, pendingApprovalSessionIds, workingDirectory, setChatListOpen } = usePanel();
-  const { addToSplit, removeFromSplit, isInSplit } = useSplit();
+  const { splitSessions, addToSplit, removeFromSplit, removeManyFromSplit, isInSplit } = useSplit();
   const { t } = useTranslation();
   const { isElectron, openNativePicker } = useNativeFolderPicker();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -375,6 +377,22 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
     }
   };
 
+  const handleEmptyChatsDeleted = useCallback((sessionIds: string[]) => {
+    if (sessionIds.length === 0) return;
+    const deletedIds = new Set(sessionIds);
+    setSessions((prev) => prev.filter((session) => !deletedIds.has(session.id)));
+    const currentSessionId = pathname.startsWith('/chat/')
+      ? pathname.slice('/chat/'.length).split('/')[0]
+      : '';
+    const currentWasInSplit = splitSessions.some((session) => session.sessionId === currentSessionId);
+    const remainingSplitCount = splitSessions.filter((session) => !deletedIds.has(session.sessionId)).length;
+    removeManyFromSplit(sessionIds);
+    if (deletedIds.has(currentSessionId) && (!currentWasInSplit || remainingSplitCount === 0)) {
+      router.push('/chat');
+    }
+    window.dispatchEvent(new CustomEvent('session-updated'));
+  }, [pathname, removeManyFromSplit, router, splitSessions]);
+
   const handleCreateSessionInProject = async (
     e: React.MouseEvent,
     workingDirectory: string
@@ -507,6 +525,8 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
               ⌘K
             </kbd>
           </Button>
+
+          <EmptyChatCleanupAction onDeleted={handleEmptyChatsDeleted} />
 
           {/* Feature pages */}
           {navItems.map((item) => {
@@ -768,19 +788,14 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
                         : <CaretDown size={12} />}
                     </span>
                   </button>
-                  {/* New assistant chat. The assistant has no folder, so this
-                      top-level "写新对话" (pencil) entry is how you start a chat
-                      that belongs to the assistant. Always visible — it's the
-                      assistant's primary action. */}
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    className="h-5 w-5 shrink-0 text-muted-foreground hover:text-foreground"
-                    title={t('chatList.newConversation')}
-                    onClick={(e) => handleCreateSessionInProject(e, aGroup.workingDirectory)}
-                  >
-                    <CodePilotIcon name="edit" size="sm" aria-hidden />
-                  </Button>
+                  {/* The assistant workspace can host the default assistant or
+                      any imported character. Compose now opens a compact
+                      identity picker instead of silently choosing the default. */}
+                  <AssistantChatPicker
+                    workingDirectory={aGroup.workingDirectory}
+                    defaultAssistantName={assistantSummary?.name || undefined}
+                    defaultAssistantEmoji={assistantSummary?.buddy?.emoji}
+                  />
                 </div>
 
                 <AnimatePresence initial={false}>

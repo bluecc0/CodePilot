@@ -36,7 +36,7 @@ import {
   getProviderSecretEnvironmentStatus,
   providerSecretStorageKind,
 } from './provider-secret-crypto';
-import type { TitleOrigin } from './conversation-title';
+import { PLACEHOLDER_TITLE, type TitleOrigin } from './conversation-title';
 import { normalizePermissionProfile, type SessionPermissionProfile } from './permission/profile';
 import type { DelegatedAgentResult, SubagentStatusError } from './subagent-status';
 
@@ -2150,6 +2150,122 @@ export function deleteSession(id: string): boolean {
     return db.prepare('DELETE FROM chat_sessions WHERE id = ?').run(id).changes > 0;
   });
   return txn();
+}
+
+/**
+ * The deliberately narrow definition used by the sidebar's bulk cleanup.
+ *
+ * A title alone is not enough: a provider failure can leave a real
+ * conversation named "New Chat". Only ordinary user sessions that still
+ * carry their birth placeholder, have no identity binding, are idle, and
+ * contain no persisted messages are safe to remove automatically.
+ */
+const EMPTY_PLACEHOLDER_SESSION_PREDICATE = `
+  source = 'user'
+  AND title = ?
+  AND title_origin = 'placeholder'
+  AND COALESCE(conversation_kind, 'single') = 'single'
+  AND COALESCE(assistant_id, '') = ''
+  AND COALESCE(group_id, '') = ''
+  AND COALESCE(runtime_status, 'idle') = 'idle'
+  AND COALESCE(sdk_session_id, '') = ''
+  AND COALESCE(codex_thread_id, '') = ''
+  AND COALESCE(context_summary, '') = ''
+  AND COALESCE(system_prompt, '') = ''
+  AND NOT EXISTS (
+    SELECT 1 FROM messages
+    WHERE messages.session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM channel_bindings
+    WHERE channel_bindings.codepilot_session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM channel_outbound_refs
+    WHERE channel_outbound_refs.codepilot_session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM tasks
+    WHERE tasks.session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM subagent_runs
+    WHERE subagent_runs.parent_session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM media_jobs
+    WHERE media_jobs.session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM media_generations
+    WHERE media_generations.session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM asset_records
+    WHERE asset_records.session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM scheduled_tasks
+    WHERE scheduled_tasks.session_id = chat_sessions.id
+       OR scheduled_tasks.origin_session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM notification_events
+    WHERE notification_events.session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM group_runs
+    WHERE group_runs.session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM media_context_events
+    WHERE media_context_events.session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM permission_requests
+    WHERE permission_requests.session_id = chat_sessions.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM session_runtime_locks
+    WHERE session_runtime_locks.session_id = chat_sessions.id
+  )
+`;
+
+export function listEmptyPlaceholderSessionIds(): string[] {
+  const rows = getDb()
+    .prepare(`SELECT id FROM chat_sessions WHERE ${EMPTY_PLACEHOLDER_SESSION_PREDICATE} ORDER BY updated_at DESC, id ASC`)
+    .all(PLACEHOLDER_TITLE) as Array<{ id: string }>;
+  return rows.map(row => row.id);
+}
+
+/**
+ * Atomically remove every session that still satisfies the safe cleanup
+ * predicate. The predicate is rechecked on DELETE so a chat that receives a
+ * first message after the preview request cannot be removed by confirmation.
+ */
+export function deleteEmptyPlaceholderSessions(): string[] {
+  const db = getDb();
+  const selectCandidates = db.prepare(
+    `SELECT id FROM chat_sessions WHERE ${EMPTY_PLACEHOLDER_SESSION_PREDICATE} ORDER BY updated_at DESC, id ASC`,
+  );
+  const deleteCandidate = db.prepare(
+    `DELETE FROM chat_sessions WHERE id = ? AND ${EMPTY_PLACEHOLDER_SESSION_PREDICATE}`,
+  );
+
+  const cleanup = db.transaction(() => {
+    const candidates = selectCandidates.all(PLACEHOLDER_TITLE) as Array<{ id: string }>;
+    const deletedIds: string[] = [];
+    for (const candidate of candidates) {
+      const result = deleteCandidate.run(candidate.id, PLACEHOLDER_TITLE);
+      if (result.changes > 0) deletedIds.push(candidate.id);
+    }
+    return deletedIds;
+  });
+
+  // Acquire the write reservation before reading candidates. This closes the
+  // preview/delete race even if another renderer process tries to write the
+  // first message at the same instant.
+  return cleanup.immediate();
 }
 
 /** Delete one session only when it belongs to the temporary privacy space. */
