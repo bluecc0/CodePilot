@@ -1,13 +1,13 @@
 /**
  * Per-session single-flight + commit gate for semantic title generation.
  *
- * Phase 1 infrastructure. Phase 2 (the actual model call) is NOT implemented
- * yet — this module exists now so the write path is provably safe BEFORE
- * anything asynchronous is allowed to race with the user. The invariant it
+ * This module keeps the asynchronous write path safe. The invariant it
  * enforces, stated once:
  *
- *   A generated title may only ever replace a `fallback` title, at most once,
- *   and only if the generation that produced it is still the current one.
+ *   An automatic generated title may only ever replace a `fallback` title,
+ *   at most once, and only if the generation that produced it is still current.
+ *   An explicit manual regeneration may replace an existing title, but still
+ *   requires the current single-flight claim and a DB compare-and-swap.
  *
  * Three independent no-op paths, each closing a real race:
  *   1. `claimTitleGeneration` returns null when a generation is already in
@@ -15,10 +15,9 @@
  *   2. `commitGeneratedTitle` rejects a token that is no longer current →
  *      a stale/expired claim (session was reset, a newer claim superseded it)
  *      cannot write.
- *   3. The DB write is a compare-and-swap on `title_origin = 'fallback'` →
- *      a manual rename that landed mid-flight wins permanently, a second
- *      result finds `generated` and no-ops, and a deleted session matches
- *      zero rows.
+ *   3. The DB write is a compare-and-swap on the caller-provided allowed
+ *      origins → a title changed after the request started cannot be silently
+ *      overwritten, and a deleted session matches zero rows.
  *
  * In-memory by design: generation is a single-process, best-effort background
  * task. A server restart drops in-flight claims, which is correct — the CAS in
@@ -26,7 +25,7 @@
  */
 
 import { updateSessionTitle } from '@/lib/db';
-import { deriveConversationTitle } from '@/lib/conversation-title';
+import { deriveConversationTitle, type TitleOrigin } from '@/lib/conversation-title';
 
 /** sessionId → the token of the generation currently allowed to commit. */
 const inFlight = new Map<string, number>();
@@ -99,6 +98,7 @@ export function commitGeneratedTitle(
   sessionId: string,
   token: number,
   rawTitle: string,
+  options?: { expectOrigin?: readonly TitleOrigin[] },
 ): boolean {
   if (!isCurrentClaim(sessionId, token)) return false;
   try {
@@ -106,7 +106,7 @@ export function commitGeneratedTitle(
     // Empty / junk model output → keep the fallback rather than write garbage.
     if (!title) return false;
     return updateSessionTitle(sessionId, title, 'generated', {
-      expectOrigin: ['fallback'],
+      expectOrigin: options?.expectOrigin ?? ['fallback'],
     });
   } finally {
     releaseTitleGeneration(sessionId, token);

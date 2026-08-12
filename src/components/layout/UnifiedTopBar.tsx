@@ -29,7 +29,8 @@ import { useSplit } from "@/hooks/useSplit";
 import { useTranslation } from "@/hooks/useTranslation";
 import { useClientPlatform } from '@/hooks/useClientPlatform';
 import { copyWithToast } from "@/lib/clipboard";
-import { renameSession } from "@/lib/session-title-events";
+import { broadcastSessionTitle, renameSession } from "@/lib/session-title-events";
+import { showToast } from '@/hooks/useToast';
 import { PRIVACY_RETURN_PATH_KEY, safePrivacyReturnPath } from '@/lib/privacy-route';
 import { disposePrivateSession, getPrivacySessionId } from '@/lib/privacy-session';
 import type { TranslationKey } from "@/i18n";
@@ -100,6 +101,7 @@ export function UnifiedTopBar() {
   // page itself).
   const [menuOpen, setMenuOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
+  const [regeneratingTitle, setRegeneratingTitle] = useState(false);
 
   const handleRename = useCallback(async (newTitle: string) => {
     const trimmed = newTitle.trim();
@@ -110,6 +112,36 @@ export function UnifiedTopBar() {
     const canonical = await renameSession(sessionId, trimmed);
     if (canonical) setSessionTitle(canonical);
   }, [sessionId, sessionTitle, setSessionTitle]);
+
+  const handleRegenerateTitle = useCallback(async () => {
+    if (!sessionId || regeneratingTitle) return;
+    setRegeneratingTitle(true);
+    try {
+      const res = await fetch(`/api/chat/sessions/${sessionId}/title`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast({
+          type: 'error',
+          message: typeof data.error === 'string'
+            ? data.error
+            : t('chatList.titleRegenerateFailed' as TranslationKey),
+        });
+        return;
+      }
+      const title = data.session?.title;
+      if (typeof title !== 'string' || !title) {
+        showToast({ type: 'error', message: t('chatList.titleRegenerateFailed' as TranslationKey) });
+        return;
+      }
+      setSessionTitle(title);
+      broadcastSessionTitle(sessionId, title);
+      showToast({ type: 'success', message: t('chatList.titleRegenerated' as TranslationKey) });
+    } catch {
+      showToast({ type: 'error', message: t('chatList.titleRegenerateFailed' as TranslationKey) });
+    } finally {
+      setRegeneratingTitle(false);
+    }
+  }, [sessionId, regeneratingTitle, setSessionTitle, t]);
 
   const handleDelete = useCallback(async () => {
     if (!sessionId) return;
@@ -348,6 +380,22 @@ export function UnifiedTopBar() {
                 >
                   <CodePilotIcon name="edit" size="sm" aria-hidden />
                   <span>{t('chatList.renameConversation' as TranslationKey)}</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={regeneratingTitle}
+                  onClick={handleRegenerateTitle}
+                >
+                  <CodePilotIcon
+                    name="refresh"
+                    size="sm"
+                    className={regeneratingTitle ? 'animate-spin' : undefined}
+                    aria-hidden
+                  />
+                  <span>
+                    {t((regeneratingTitle
+                      ? 'chatList.regeneratingTitle'
+                      : 'chatList.regenerateTitle') as TranslationKey)}
+                  </span>
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={handleCopyId}>
                   <CodePilotIcon name="copy" size="sm" aria-hidden />

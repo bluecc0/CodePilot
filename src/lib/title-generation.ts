@@ -28,12 +28,12 @@
  *     wire constructors. If the session's provider can't do it, the fallback
  *     title stands. That is the whole trade.
  *
- *  3. NEVER OVERWRITE A REAL TITLE, AND NEVER TRY TWICE. The write goes through
- *     `commitGeneratedTitle` (title-generation-claim.ts) — per-session
- *     single-flight plus a DB compare-and-swap on `title_origin = 'fallback'`.
- *     `markTitleGenerationAttempt` spends the session's one attempt before the
- *     call, so a duplicate completion event costs nothing and a failure never
- *     becomes a retry. This module adds no write path of its own.
+ *  3. AUTOMATIC GENERATION NEVER OVERWRITES A REAL TITLE, AND NEVER TRIES
+ *     TWICE. The automatic write goes through `commitGeneratedTitle`
+ *     (title-generation-claim.ts) — per-session single-flight plus a DB
+ *     compare-and-swap on `title_origin = 'fallback'`. The explicit manual
+ *     regeneration path uses the same claim gate but is deliberately allowed
+ *     to retry and replace an existing title because the user initiated it.
  *
  *  4. NEVER SURFACE A FAILURE. Every outcome is a value, never a throw and
  *     never a toast. Timeout, offline, rate limit, empty output, malformed
@@ -62,6 +62,11 @@ export const TITLE_MAX_OUTPUT_TOKENS = 16;
 /** Wall-clock budget for the whole call. A title that arrives after this is
  *  worth less than the request it's still holding open. */
 export const TITLE_TIMEOUT_MS = 8_000;
+
+/** Explicit regeneration is user initiated, so it can wait through the
+ * startup cost of the Claude Code SDK instead of falling back after 8s. */
+export const TITLE_MANUAL_TIMEOUT_MS = 30_000;
+export const TITLE_MANUAL_MAX_OUTPUT_TOKENS = 64;
 
 /**
  * Some Anthropic-compatible providers cannot disable thinking. Kimi Code is
@@ -292,6 +297,9 @@ export interface GenerateSessionTitleInput {
   providerId: string;
   /** The session's own resolved model, if any. */
   model?: string;
+  /** Automatic generation is background-only and one-shot. Manual generation
+   * is an explicit user action and may retry/replace an existing title. */
+  mode?: 'automatic' | 'manual';
   /** Seam for tests: performs the actual one-shot call. */
   callModel?: TitleModelCall;
   /** Seam for tests: captures the exact provider-owned configuration once.
@@ -314,6 +322,8 @@ export type TitleModelCall = (args: {
   system: string;
   prompt: string;
   abortSignal: AbortSignal;
+  maxOutputTokens?: number;
+  timeoutMs?: number;
 }) => Promise<string>;
 
 /**
@@ -344,6 +354,8 @@ const defaultCallModel: TitleModelCall = async ({
   system,
   prompt,
   abortSignal,
+  maxOutputTokens,
+  timeoutMs,
 }) => {
   const callProfile = resolveTitleGenerationCallProfile(resolvedProvider);
   if (runtime === 'claude_code') {
@@ -369,8 +381,8 @@ const defaultCallModel: TitleModelCall = async ({
       // per-request max_tokens, so this rides CLAUDE_CODE_MAX_OUTPUT_TOKENS.
       // The hard bound stays sanitizeGeneratedTitle's 50-grapheme cap. We do
       // not claim a wire-level token cap for claude_code.
-      maxOutputTokens: callProfile.maxOutputTokens,
-      timeoutMs: callProfile.timeoutMs,
+      maxOutputTokens: maxOutputTokens ?? callProfile.maxOutputTokens,
+      timeoutMs: timeoutMs ?? callProfile.timeoutMs,
     });
   }
 
@@ -385,7 +397,7 @@ const defaultCallModel: TitleModelCall = async ({
     model: model || '',
     system,
     prompt,
-    maxTokens: callProfile.maxOutputTokens,
+    maxTokens: maxOutputTokens ?? callProfile.maxOutputTokens,
     abortSignal,
   });
 };
@@ -405,6 +417,7 @@ export async function generateSessionTitle(
   input: GenerateSessionTitleInput,
 ): Promise<TitleGenerationResult> {
   const startedAt = Date.now();
+  const isManual = input.mode === 'manual';
   const done = (
     outcome: TitleGenerationOutcome,
     failureReason?: TitleGenerationResult['failureReason'],
@@ -476,20 +489,24 @@ export async function generateSessionTitle(
       return done('provider-unavailable');
     }
 
-    // Once per session, spent immediately before the call and never released,
-    // so a duplicate completion event or a post-failure re-entry cannot reach
-    // the provider a second time. Ordered AFTER the claim (a concurrent
-    // duplicate is 'skipped-busy' — it never got far enough to spend anything)
-    // and AFTER the provider check (a check that called nothing hasn't used the
-    // session's one attempt).
-    if (!markTitleGenerationAttempt(input.sessionId)) {
+    // Automatic generation is deliberately one-shot: a background completion
+    // event or provider failure must not silently send the user's text again.
+    // Manual regeneration is different — the user explicitly asked for a new
+    // title, so it bypasses that automatic-attempt budget.
+    if (!isManual && !markTitleGenerationAttempt(input.sessionId)) {
       releaseTitleGeneration(input.sessionId, token);
       return done('already-attempted');
     }
 
     const callProfile = resolveTitleGenerationCallProfile(resolvedProvider);
-    timeoutId = setTimeout(() => controller.abort(), callProfile.timeoutMs);
-    const raw = await (input.callModel || defaultCallModel)({
+    const maxOutputTokens = isManual
+      ? Math.max(callProfile.maxOutputTokens, TITLE_MANUAL_MAX_OUTPUT_TOKENS)
+      : callProfile.maxOutputTokens;
+    const timeoutMs = isManual
+      ? Math.max(callProfile.timeoutMs, TITLE_MANUAL_TIMEOUT_MS)
+      : callProfile.timeoutMs;
+    timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const callArgs: Parameters<TitleModelCall>[0] = {
       runtime: input.runtime,
       providerId: input.providerId,
       resolvedProvider,
@@ -497,7 +514,14 @@ export async function generateSessionTitle(
       system: TITLE_SYSTEM_PROMPT,
       prompt,
       abortSignal: controller.signal,
-    });
+    };
+    // Keep the automatic call shape minimal and backwards-compatible. The
+    // larger explicit-call budget is only part of a manual regeneration.
+    if (isManual) {
+      callArgs.maxOutputTokens = maxOutputTokens;
+      callArgs.timeoutMs = timeoutMs;
+    }
+    const raw = await (input.callModel || defaultCallModel)(callArgs);
 
     const title = sanitizeGeneratedTitle(raw);
     if (!title) {
@@ -505,9 +529,14 @@ export async function generateSessionTitle(
       return done('empty-output');
     }
 
-    // commitGeneratedTitle re-checks the claim, re-derives, and CAS-writes on
-    // `fallback`. It releases the claim itself, success or not.
-    const wrote = commitGeneratedTitle(input.sessionId, token, title);
+    // Automatic generation only replaces fallback titles. A manual request is
+    // an explicit user action and may regenerate an existing AI/manual title,
+    // while the claim still prevents concurrent or stale writes.
+    const wrote = commitGeneratedTitle(input.sessionId, token, title, {
+      expectOrigin: isManual
+        ? ['placeholder', 'fallback', 'generated', 'manual']
+        : ['fallback'],
+    });
     return done(wrote ? 'generated' : 'not-committed');
   } catch {
     // Timeout, offline, rate limit, provider 4xx/5xx, subprocess death. All the

@@ -23,7 +23,7 @@ import type { TranslationKey } from "@/i18n";
 import { useNativeFolderPicker } from "@/hooks/useNativeFolderPicker";
 import { showToast } from '@/hooks/useToast';
 import { cn } from "@/lib/utils";
-import { renameSession } from "@/lib/session-title-events";
+import { broadcastSessionTitle, renameSession } from "@/lib/session-title-events";
 // ConnectionStatus removed from header — CLI status now lives in Settings > Claude CLI
 // ImportSessionDialog moved to Settings page
 import { SessionListItem } from "./SessionListItem";
@@ -60,6 +60,7 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [hoveredSession, setHoveredSession] = useState<string | null>(null);
   const [deletingSession, setDeletingSession] = useState<string | null>(null);
+  const [regeneratingTitleSession, setRegeneratingTitleSession] = useState<string | null>(null);
   const [expandedSessionGroups, setExpandedSessionGroups] = useState<Set<string>>(new Set());
   const SESSION_TRUNCATE_LIMIT = 10;
   // importDialogOpen removed — Import CLI moved to Settings
@@ -311,6 +312,38 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
     setSessions((prev) =>
       prev.map((s) => (s.id === sessionId ? { ...s, title: canonical } : s))
     );
+  };
+
+  const handleRegenerateTitle = async (sessionId: string) => {
+    if (regeneratingTitleSession) return;
+    setRegeneratingTitleSession(sessionId);
+    try {
+      const res = await fetch(`/api/chat/sessions/${sessionId}/title`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast({
+          type: 'error',
+          message: typeof data.error === 'string'
+            ? data.error
+            : t('chatList.titleRegenerateFailed' as TranslationKey),
+        });
+        return;
+      }
+      const title = data.session?.title;
+      if (typeof title !== 'string' || !title) {
+        showToast({ type: 'error', message: t('chatList.titleRegenerateFailed' as TranslationKey) });
+        return;
+      }
+      setSessions((prev) => prev.map((session) => (
+        session.id === sessionId ? { ...session, title } : session
+      )));
+      broadcastSessionTitle(sessionId, title);
+      showToast({ type: 'success', message: t('chatList.titleRegenerated' as TranslationKey) });
+    } catch {
+      showToast({ type: 'error', message: t('chatList.titleRegenerateFailed' as TranslationKey) });
+    } finally {
+      setRegeneratingTitleSession(null);
+    }
   };
 
   const handleRemoveProject = async (workingDirectory: string) => {
@@ -643,6 +676,8 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
                                         onMouseLeave={() => setHoveredSession(null)}
                                         onDelete={handleDeleteSession}
                                         onRename={handleRenameSession}
+                                        onRegenerateTitle={handleRegenerateTitle}
+                                        isRegeneratingTitle={regeneratingTitleSession === session.id}
                                         onAddToSplit={(s) => addToSplit({
                                           sessionId: s.id,
                                           title: s.title,
@@ -778,6 +813,8 @@ export function ChatListPanel({ open, hasUpdate, readyToInstall }: ChatListPanel
                               onMouseLeave={() => setHoveredSession(null)}
                               onDelete={handleDeleteSession}
                               onRename={handleRenameSession}
+                              onRegenerateTitle={handleRegenerateTitle}
+                              isRegeneratingTitle={regeneratingTitleSession === session.id}
                               onAddToSplit={(s) => addToSplit({
                                 sessionId: s.id,
                                 title: s.title,

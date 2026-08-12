@@ -3246,6 +3246,25 @@ export function getMessages(
 }
 
 /**
+ * Read the earliest real user message without loading an entire long
+ * transcript. Used by explicit title regeneration, which intentionally labels
+ * the same user-visible seed text as the automatic title path.
+ */
+export function getFirstUserMessage(sessionId: string): Message | undefined {
+  const db = getDb();
+  return db.prepare(
+    `SELECT *, rowid as _rowid
+       FROM messages
+      WHERE session_id = ?
+        AND role = 'user'
+        AND (is_heartbeat_ack IS NULL OR is_heartbeat_ack = 0)
+        AND (message_kind IS NULL OR message_kind != 'system')
+      ORDER BY rowid ASC
+      LIMIT 1`,
+  ).get(sessionId) as Message | undefined;
+}
+
+/**
  * Phase 3 Step 4: addMessage accepts optional `metadata` for callers
  * that need to associate a message with a `task_run_logs` row (the
  * agent task runner does this for both the user prompt and the

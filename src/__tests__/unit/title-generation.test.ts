@@ -40,6 +40,8 @@ const {
   TITLE_SYSTEM_PROMPT,
   TITLE_MAX_OUTPUT_TOKENS,
   TITLE_TIMEOUT_MS,
+  TITLE_MANUAL_MAX_OUTPUT_TOKENS,
+  TITLE_MANUAL_TIMEOUT_MS,
   TITLE_PROVIDER_MANAGED_THINKING_MAX_OUTPUT_TOKENS,
   TITLE_PROVIDER_MANAGED_THINKING_TIMEOUT_MS,
   TITLE_MAX_CONCURRENT,
@@ -514,6 +516,42 @@ describe('call constraints — g04', () => {
     assert.equal(again.outcome, 'already-attempted');
     assert.equal(calls, 1, 'one attempt per session, however the first one ended');
     assert.equal(getSession(sessionId)!.title, 'Original fallback');
+  });
+
+  it('manual regeneration can retry after automatic generation failed', async () => {
+    const sessionId = sessionWithFallback('Original fallback');
+    let calls = 0;
+    const first = await generateSessionTitle(
+      input({
+        sessionId,
+        callModel: async () => {
+          calls += 1;
+          throw new Error('ECONNREFUSED');
+        },
+      }),
+    );
+    assert.equal(first.outcome, 'failed');
+
+    let manualMaxOutputTokens: number | undefined;
+    let manualTimeoutMs: number | undefined;
+    const regenerated = await generateSessionTitle(
+      input({
+        sessionId,
+        mode: 'manual',
+        callModel: async (args) => {
+          calls += 1;
+          manualMaxOutputTokens = args.maxOutputTokens;
+          manualTimeoutMs = args.timeoutMs;
+          return 'AI generated title';
+        },
+      }),
+    );
+    assert.equal(regenerated.outcome, 'generated');
+    assert.equal(calls, 2);
+    assert.equal(getSession(sessionId)!.title, 'AI generated title');
+    assert.equal(getSession(sessionId)!.title_origin, 'generated');
+    assert.equal(manualMaxOutputTokens, TITLE_MANUAL_MAX_OUTPUT_TOKENS);
+    assert.equal(manualTimeoutMs, TITLE_MANUAL_TIMEOUT_MS);
   });
 
   it('single-flight: a concurrent second attempt on the same session is dropped', async () => {

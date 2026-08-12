@@ -46,6 +46,8 @@ interface SessionListItemProps {
   onMouseLeave: () => void;
   onDelete: (sessionId: string) => void;
   onRename: (sessionId: string, newTitle: string) => void;
+  onRegenerateTitle: (sessionId: string) => void;
+  isRegeneratingTitle: boolean;
   onAddToSplit: (session: ChatSession) => void;
 }
 
@@ -64,6 +66,8 @@ export function SessionListItem({
   onMouseLeave,
   onDelete,
   onRename,
+  onRegenerateTitle,
+  isRegeneratingTitle,
   onAddToSplit,
 }: SessionListItemProps) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -167,6 +171,22 @@ export function SessionListItem({
                   <CodePilotIcon name="edit" size="sm" aria-hidden />
                   <span>{t('chatList.renameConversation' as TranslationKey)}</span>
                 </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={isRegeneratingTitle}
+                  onClick={() => onRegenerateTitle(session.id)}
+                >
+                  <CodePilotIcon
+                    name="refresh"
+                    size="sm"
+                    className={isRegeneratingTitle ? 'animate-spin' : undefined}
+                    aria-hidden
+                  />
+                  <span>
+                    {t((isRegeneratingTitle
+                      ? 'chatList.regeneratingTitle'
+                      : 'chatList.regenerateTitle') as TranslationKey)}
+                  </span>
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => {
                   // v11 fix — see lib/clipboard.ts for why fire-and-forget
                   // writeText fails in Electron renderers post-DropdownMenu blur.
@@ -205,6 +225,22 @@ export function SessionListItem({
           <ContextMenuItem onSelect={handleContextRenameSelect}>
             <CodePilotIcon name="edit" size="sm" aria-hidden />
             <span>{t('chatList.renameConversation' as TranslationKey)}</span>
+          </ContextMenuItem>
+          <ContextMenuItem
+            disabled={isRegeneratingTitle}
+            onSelect={() => onRegenerateTitle(session.id)}
+          >
+            <CodePilotIcon
+              name="refresh"
+              size="sm"
+              className={isRegeneratingTitle ? 'animate-spin' : undefined}
+              aria-hidden
+            />
+            <span>
+              {t((isRegeneratingTitle
+                ? 'chatList.regeneratingTitle'
+                : 'chatList.regenerateTitle') as TranslationKey)}
+            </span>
           </ContextMenuItem>
           <ContextMenuItem
             onSelect={() => void copyWithToast({ text: session.id, t })}
