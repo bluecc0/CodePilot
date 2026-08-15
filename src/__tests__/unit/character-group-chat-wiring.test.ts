@@ -41,4 +41,10 @@ test('single-character selection is persisted and sent on every turn', () => {
   assert.match(chatRoute, /buildCharacterSystemPrompt\(profile\)/);
   assert.match(streamManager, /assistant_id: params\.assistantId/);
   assert.match(chatView, /<CharacterSelector/);
+  assert.match(chatView, /const canSelectCharacter = isAssistantProject \|\| Boolean\(assistantId\)/);
+  assert.match(
+    chatView,
+    /canSelectCharacter && \(\s*<CharacterSelector/,
+    'ordinary project conversations must not render the character selector',
+  );
 });

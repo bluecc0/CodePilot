@@ -242,6 +242,10 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
   const [context1m, setContext1m] = useState(false);
   const [hasSummary, setHasSummary] = useState(initialHasSummary || false);
   const [assistantId, setAssistantId] = useState(initialAssistantId || '');
+  // Character selection belongs to the assistant workspace. Keep it visible
+  // for an already-bound character session even if its working directory was
+  // later changed, but do not expose it in ordinary project conversations.
+  const canSelectCharacter = isAssistantProject || Boolean(assistantId);
 
   // Sync model/provider when session data loads. providerId='' is a
   // valid env-mode session value (Codex P1 review) — guard with
@@ -1544,7 +1548,9 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
             <ChatComposerActionBar
               left={
                 <>
-                  <CharacterSelector value={assistantId} onChange={handleAssistantChange} disabled={isStreaming || messages.length > 0} />
+                  {canSelectCharacter && (
+                    <CharacterSelector value={assistantId} onChange={handleAssistantChange} disabled={isStreaming || messages.length > 0} />
+                  )}
                   <ModeIndicator mode={mode} onModeChange={handleModeChange} disabled={isStreaming} />
                   <RuntimeSelector
                     runtimePin={runtimePin}
@@ -1824,7 +1830,9 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
       <ChatComposerActionBar
         left={
           <>
-            <CharacterSelector value={assistantId} onChange={handleAssistantChange} disabled={isStreaming || messages.length > 0} />
+            {canSelectCharacter && (
+              <CharacterSelector value={assistantId} onChange={handleAssistantChange} disabled={isStreaming || messages.length > 0} />
+            )}
             <ModeIndicator mode={mode} onModeChange={handleModeChange} disabled={isStreaming} />
             <RuntimeSelector
               runtimePin={runtimePin}
