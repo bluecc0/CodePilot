@@ -33,7 +33,7 @@ export function ModeIndicator({ mode, onModeChange, disabled }: ModeIndicatorPro
           variant="ghost"
           size="xs"
           disabled={disabled}
-          className="h-7 rounded-md text-xs font-normal text-muted-foreground"
+          className="composer-toolbar-trigger h-7 rounded-md text-xs font-normal text-muted-foreground"
         >
           {isPlan ? <NotePencil size={12} /> : <CodePilotIcon name="code" size={12} aria-hidden />}
           <span>{label}</span>

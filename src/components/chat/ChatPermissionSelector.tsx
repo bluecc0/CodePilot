@@ -162,7 +162,7 @@ export function ChatPermissionSelector({
             variant="ghost"
             size="xs"
             className={cn(
-              'h-7 rounded-md',
+              'composer-toolbar-trigger h-7 rounded-md',
               isFullAccess
                 // full_access is a dangerous override — keep the chip
                 // visible at full weight. Override ghost's hover so the

@@ -4,6 +4,21 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Compact composer selectors should read as inline controls, not focused
+ * form fields. The shared Button/Select primitives use a generous 3px ring;
+ * in the composer that ring remains after a mouse click and looks like a
+ * selection outline. Keep keyboard focus visible, but make it quieter. */
+.composer-toolbar-trigger:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.composer-toolbar-trigger:focus-visible {
+  outline: none;
+  border-color: color-mix(in oklch, var(--ring) 32%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 14%, transparent);
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

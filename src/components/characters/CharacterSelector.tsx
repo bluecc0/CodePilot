@@ -31,7 +31,7 @@ export function CharacterSelector({ value, onChange, disabled = false }: {
 
   return (
     <Select value={value || DEFAULT_VALUE} onValueChange={next => onChange(next === DEFAULT_VALUE ? '' : next)} disabled={disabled}>
-      <SelectTrigger className="h-7 w-[150px] gap-1 border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground" aria-label={t('characters.selectorLabel')}>
+      <SelectTrigger className="composer-toolbar-trigger h-7 w-[150px] gap-1 border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground" aria-label={t('characters.selectorLabel')}>
         <SelectValue placeholder={t('characters.defaultAssistant')} />
       </SelectTrigger>
       <SelectContent>

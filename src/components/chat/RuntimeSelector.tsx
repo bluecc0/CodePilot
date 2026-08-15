@@ -118,7 +118,7 @@ export function RuntimeSelector({
           data-runtime-selector
           aria-label={t('runtimeSelector.triggerAria' as TranslationKey)}
           className={cn(
-            'h-7 rounded-md text-xs font-normal text-muted-foreground',
+            'composer-toolbar-trigger h-7 rounded-md text-xs font-normal text-muted-foreground',
           )}
         >
           <RuntimeIcon runtime={activeRuntime} size={12} />
