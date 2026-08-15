@@ -10,6 +10,7 @@ const groupView = fs.readFileSync(path.join(root, 'src/components/characters/Gro
 const sessionRoute = fs.readFileSync(path.join(root, 'src/app/api/chat/sessions/route.ts'), 'utf8');
 const streamManager = fs.readFileSync(path.join(root, 'src/lib/stream-session-manager.ts'), 'utf8');
 const chatView = fs.readFileSync(path.join(root, 'src/components/chat/ChatView.tsx'), 'utf8');
+const newChatPage = fs.readFileSync(path.join(root, 'src/app/chat/page.tsx'), 'utf8');
 
 test('group turns fail closed against session, queue, and continuation position', () => {
   assert.match(chatRoute, /session\.conversation_kind !== 'group'/);
@@ -41,10 +42,16 @@ test('single-character selection is persisted and sent on every turn', () => {
   assert.match(chatRoute, /buildCharacterSystemPrompt\(profile\)/);
   assert.match(streamManager, /assistant_id: params\.assistantId/);
   assert.match(chatView, /<CharacterSelector/);
-  assert.match(chatView, /const canSelectCharacter = isAssistantProject \|\| Boolean\(assistantId\)/);
+  assert.match(chatView, /const canSelectCharacter = isAssistantProject/);
   assert.match(
     chatView,
     /canSelectCharacter && \(\s*<CharacterSelector/,
     'ordinary project conversations must not render the character selector',
+  );
+  assert.match(newChatPage, /const canSelectCharacter = Boolean\(assistantWorkspacePath && workingDir === assistantWorkspacePath\)/);
+  assert.match(
+    newChatPage,
+    /canSelectCharacter && \(\s*<CharacterSelector/,
+    'the ordinary new-chat page must not render the character selector',
   );
 });

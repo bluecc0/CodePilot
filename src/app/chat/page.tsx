@@ -166,6 +166,10 @@ function NewChatPageInner({ ephemeral = false }: { ephemeral?: boolean } = {}) {
   const [assistantConfigured, setAssistantConfigured] = useState(false);
   const [assistantWorkspacePath, setAssistantWorkspacePath] = useState('');
   const [selectedAssistantId, setSelectedAssistantId] = useState('');
+  // The character picker is an assistant-workspace control. The configured
+  // workspace may exist globally, but ordinary project chats must not render
+  // it merely because the app has character profiles.
+  const canSelectCharacter = Boolean(assistantWorkspacePath && workingDir === assistantWorkspacePath);
   const [mode, setMode] = useState('code');
   // Model/provider start empty — populated by the async global-default fetch.
   // This prevents the race where a user sends before the fetch completes and
@@ -1494,7 +1498,9 @@ function NewChatPageInner({ ephemeral = false }: { ephemeral?: boolean } = {}) {
       <ChatComposerActionBar
         left={
           <>
-            <CharacterSelector value={selectedAssistantId} onChange={setSelectedAssistantId} disabled={isStreaming} />
+            {canSelectCharacter && (
+              <CharacterSelector value={selectedAssistantId} onChange={setSelectedAssistantId} disabled={isStreaming} />
+            )}
             <ModeIndicator mode={mode} onModeChange={setMode} disabled={isStreaming} />
             <RuntimeSelector
               runtimePin={runtimePin}
