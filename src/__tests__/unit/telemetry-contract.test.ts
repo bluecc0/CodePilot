@@ -121,27 +121,33 @@ describe('telemetry U0 contract', () => {
     );
   });
 
-  it('replaces the Electron session producer with one eager instance', () => {
+  it('replaces Electron session and ChildProcess producers with one controlled instance each', () => {
     const eager: { name: string; eager?: boolean } = { name: 'MainProcessSession', eager: true };
+    const breadcrumbsOnly: { name: string; events?: string[] } = { name: 'ChildProcess', events: [] };
     const configured = configureElectronMainIntegrations([
       { name: 'InboundFilters' },
+      { name: 'ChildProcess' },
       { name: 'MainProcessSession' },
+      { name: 'ChildProcess' },
       { name: 'MainProcessSession' },
       { name: 'Console' },
-    ], eager);
+    ], eager, breadcrumbsOnly);
     assert.deepEqual(configured, [
       { name: 'InboundFilters' },
+      breadcrumbsOnly,
       eager,
     ]);
     assert.equal(configured.filter((item) => item.name === 'MainProcessSession').length, 1);
+    assert.equal(configured.filter((item) => item.name === 'ChildProcess').length, 1);
   });
 
-  it('adds one eager Electron session when an SDK default is absent', () => {
+  it('adds controlled Electron integrations when SDK defaults are absent', () => {
     const eager: { name: string; eager?: boolean } = { name: 'MainProcessSession', eager: true };
+    const breadcrumbsOnly: { name: string; events?: string[] } = { name: 'ChildProcess', events: [] };
     const configured = configureElectronMainIntegrations([
       { name: 'InboundFilters' },
-    ], eager);
-    assert.deepEqual(configured, [{ name: 'InboundFilters' }, eager]);
+    ], eager, breadcrumbsOnly);
+    assert.deepEqual(configured, [{ name: 'InboundFilters' }, eager, breadcrumbsOnly]);
   });
 
   it('separates product faults from expected/user-action outcomes', () => {

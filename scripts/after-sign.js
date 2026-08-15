@@ -6,9 +6,10 @@
  * vars are set), electron-builder handles signing automatically. This hook only
  * runs a strict verification to confirm the signature is intact.
  *
- * When no certificate is available (local dev builds), falls back to ad-hoc
- * signing so that electron-updater's ShipIt process can still validate the
- * code signature.
+ * Distributable builds require a Developer ID signature with the configured
+ * Team ID. Ad-hoc signing is available only behind an explicit local-build
+ * flag; silently shipping an ad-hoc build changes its designated requirement
+ * on every rebuild and makes macOS prompt for the existing Safe Storage item.
  *
  * Ad-hoc signing order (inside-out):
  *   1. All native binaries (.node, .dylib, .so)
@@ -19,21 +20,26 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { spawnSync } = require('child_process');
+const { resolveMacosSigningMode } = require('./macos-signing-policy.cjs');
 
 /**
- * Ad-hoc sign a single path. Failures are logged but non-fatal to avoid
- * breaking builds on edge-case binaries (e.g. debug symbols).
+ * Ad-hoc sign a single path. Any failure is fatal: a partially signed package
+ * must never be promoted as a usable local smoke artifact.
  */
-function codesign(targetPath) {
-  try {
-    execSync(`codesign --force --sign - "${targetPath}"`, {
-      stdio: 'pipe',
-      timeout: 30000,
-    });
-  } catch (err) {
-    console.warn(`[afterSign] Failed to sign ${targetPath}: ${err.message}`);
+function runCodesign(args, timeout = 30000) {
+  const result = spawnSync('/usr/bin/codesign', args, {
+    encoding: 'utf8',
+    timeout,
+  });
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || 'codesign failed').trim());
   }
+  return `${result.stdout || ''}\n${result.stderr || ''}`;
+}
+
+function codesign(targetPath) {
+  runCodesign(['--force', '--sign', '-', targetPath]);
 }
 
 /**
@@ -123,40 +129,24 @@ module.exports = async function afterSign(context) {
     return;
   }
 
-  // ── Detect real (non-ad-hoc) code signature ───────────────────────────
-  // Check env vars first (CI path), then probe the actual signature on the
-  // .app bundle (covers the case where electron-builder auto-discovered a
-  // Developer ID certificate from the local Keychain).
-  let hasRealSignature = !!(process.env.CSC_LINK || process.env.CSC_NAME);
-
-  if (!hasRealSignature) {
-    try {
-      const info = execSync(`codesign -d --verbose=2 "${appPath}" 2>&1`, {
-        stdio: 'pipe',
-        timeout: 15000,
-        encoding: 'utf-8',
-      });
-      if (/Authority=Developer ID Application/.test(info)) {
-        hasRealSignature = true;
-      }
-    } catch {
-      // codesign -d fails if the bundle is unsigned — that's fine
-    }
+  let signatureOutput = '';
+  try {
+    signatureOutput = runCodesign(['-d', '--verbose=4', appPath], 15000);
+  } catch {
+    // An unsigned bundle is handled by the explicit policy below.
   }
+  const signingMode = resolveMacosSigningMode({
+    signatureOutput,
+    requireDeveloperId: process.env.CODEPILOT_REQUIRE_DEVELOPER_ID === '1',
+    allowAdhoc: process.env.CODEPILOT_ALLOW_ADHOC_SIGNING === '1',
+    expectedTeamId: process.env.CODEPILOT_APPLE_TEAM_ID?.trim() || '',
+  });
 
-  if (hasRealSignature) {
-    console.log('[afterSign] Real code signing certificate detected (CSC_LINK/CSC_NAME set or Developer ID signature found).');
+  if (signingMode.mode === 'developer_id') {
+    console.log(`[afterSign] Developer ID signature detected; team=${signingMode.teamId}.`);
     console.log('[afterSign] Skipping ad-hoc signing to preserve Developer ID signature.');
-
-    try {
-      execSync(`codesign --verify --deep --strict --verbose=4 "${appPath}"`, {
-        stdio: 'pipe',
-        timeout: 60000,
-      });
-      console.log('[afterSign] Developer ID signature verification passed.');
-    } catch (err) {
-      console.error('[afterSign] WARNING: Developer ID signature verification FAILED:', err.stderr?.toString() || err.message);
-    }
+    runCodesign(['--verify', '--deep', '--strict', '--verbose=4', appPath], 60000);
+    console.log('[afterSign] Developer ID signature verification passed.');
     return;
   }
 
@@ -216,14 +206,6 @@ module.exports = async function afterSign(context) {
 
   console.log(`[afterSign] Ad-hoc signing complete — ${signed} components signed`);
 
-  // Verify
-  try {
-    execSync(`codesign --verify --deep --strict "${appPath}"`, {
-      stdio: 'pipe',
-      timeout: 30000,
-    });
-    console.log('[afterSign] Signature verification passed (--deep --strict)');
-  } catch (err) {
-    console.error('[afterSign] WARNING: Signature verification FAILED:', err.stderr?.toString() || err.message);
-  }
+  runCodesign(['--verify', '--deep', '--strict', appPath]);
+  console.log('[afterSign] Signature verification passed (--deep --strict)');
 };

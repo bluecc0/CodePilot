@@ -5,6 +5,7 @@ import { join } from 'path';
 import { configureElectronMainIntegrations, resolveTelemetryConfig, TELEMETRY_IGNORE_ERRORS } from '../src/lib/telemetry/contract';
 import { sanitizeTelemetryBreadcrumb, sanitizeTelemetryEvent } from '../src/lib/telemetry/sanitize';
 import { createTelemetrySmokeError, telemetrySmokeEnabled } from '../src/lib/telemetry/smoke';
+import { buildUtilityProcessFailureEvent } from '../src/lib/telemetry/utility-process-failure';
 
 // Check opt-out before init — reads a marker file that the renderer writes
 const sentryOptOutPath = join(
@@ -35,6 +36,7 @@ if (electronTelemetry.enabled) {
     integrations: (defaults) => configureElectronMainIntegrations(
       defaults,
       Sentry.mainProcessSessionIntegration({ sendOnCreate: true }),
+      Sentry.childProcessIntegration({ events: [] }),
     ),
     beforeBreadcrumb(breadcrumb) {
       return sanitizeTelemetryBreadcrumb(breadcrumb);
@@ -79,6 +81,12 @@ import net from 'net';
 import os from 'os';
 import { TerminalManager } from './terminal-manager';
 import { validateTerminalCreateOpts } from './terminal-create-validation';
+import { ServerRecoverySupervisor } from './server-supervisor';
+import {
+  parseServerDescendantLifecycleMessage,
+  ServerDescendantRegistry,
+} from './server-descendant-registry';
+import { buildServerRecoveryDataUrl, type ServerRecoveryPageState } from './server-recovery-page';
 import {
   buildCodexPowerShellLaunchSpec,
   findWindowsNpmCommand,
@@ -86,6 +94,10 @@ import {
   selectCodexWindowsInstallCommand,
 } from './codex-windows-recovery';
 import { initializeProviderSecretEnvironment } from './provider-secret-key';
+import {
+  PROVIDER_SECRET_ISOLATED_SMOKE_ENV,
+  shouldSkipProviderSecretForIsolatedSmoke,
+} from './provider-secret-startup-policy';
 import { sanitizeLogLine } from './log-sanitize';
 import {
   buildMacosKeychainEnvironment,
@@ -111,6 +123,7 @@ import {
   type SystemPathPurpose,
   validateScopedPathInspection,
 } from '../src/lib/local-path-security';
+import { parseServerRuntimeObservabilityMessage } from '../src/lib/server-runtime-observability';
 
 // B-025: hard caps for the persistent main log + the in-memory server-output
 // ring. The 12.5 GB log a user hit came from an unbounded active file plus an
@@ -132,7 +145,11 @@ const SERVER_ERRORS_MAX_BYTES = 256 * 1024;
 function sanitizedProcessEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (!key.startsWith('__NEXT_PRIVATE_') && value !== undefined) {
+    if (
+      !key.startsWith('__NEXT_PRIVATE_')
+      && key !== PROVIDER_SECRET_ISOLATED_SMOKE_ENV
+      && value !== undefined
+    ) {
       env[key] = value;
     }
   }
@@ -154,6 +171,26 @@ let mainLogWriter: RotatingLogWriter | null = null;
 let activeMainLogPath: string | null = null;
 let serverExited = false;
 let serverExitCode: number | null = null;
+const serverSupervisor = new ServerRecoverySupervisor();
+let nextServerGeneration = 0;
+let activeServerGeneration = 0;
+let serverLifecyclePhase: 'startup' | 'running' | 'recovering' | 'quitting' = 'startup';
+let serverRecoveryPromise: Promise<void> | null = null;
+let queuedServerRecovery: { generation: number; reason: string } | null = null;
+let lastRecoverableRoute = '/';
+let lastServerFailureReason = 'server_exit';
+let lastServerRecoveryAttempt = 0;
+let lastServerRecoveryPageState: ServerRecoveryPageState = 'recovering';
+let activeServerRecoveryDataUrl: string | null = null;
+const serverDescendantRegistries = new Map<number, ServerDescendantRegistry>();
+let lastServerRuntimeMetrics: ReturnType<typeof parseServerRuntimeObservabilityMessage> = null;
+let lastServerProcessMetric: {
+  workingSetKb: number;
+  peakWorkingSetKb: number;
+  privateKb: number | null;
+  creationTime: number;
+  cpuPercent: number;
+} | null = null;
 let userShellEnv: Record<string, string> = {};
 let resolvedProxyEnv: Record<string, string> = {};
 let providerSecretEnvironment: Record<string, string> = {};
@@ -394,6 +431,16 @@ async function resolveScopedSystemPath(
  */
 function showMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) {
+    if (!isDev && (serverLifecyclePhase === 'recovering' || serverSupervisor.state === 'failed')) {
+      activeServerRecoveryDataUrl = buildServerRecoveryDataUrl({
+        locale: serverRecoveryLocale(),
+        state: lastServerRecoveryPageState,
+        attempt: lastServerRecoveryAttempt,
+        reasonCode: lastServerFailureReason,
+      });
+      createWindow(activeServerRecoveryDataUrl);
+      return;
+    }
     createWindow(chatWindowUrlForRevival());
     return;
   }
@@ -960,7 +1007,200 @@ async function waitForServer(port: number, timeout = 30000): Promise<void> {
   );
 }
 
-function startServer(port: number): Electron.UtilityProcess {
+function serverRecoveryLocale(): string {
+  try { return app.getLocale(); } catch { return 'en'; }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function captureRecoverableRoute(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || !serverPort) return;
+  try {
+    const current = new URL(mainWindow.webContents.getURL());
+    if (current.protocol !== 'http:' || current.hostname !== '127.0.0.1') return;
+    if (current.port !== String(serverPort)) return;
+    lastRecoverableRoute = `${current.pathname}${current.search}${current.hash}` || '/';
+  } catch {
+    // data: loading/recovery pages are intentionally ignored.
+  }
+}
+
+function showServerRecoveryPage(
+  state: ServerRecoveryPageState,
+  attempt: number,
+  reasonCode: string,
+): void {
+  lastServerFailureReason = reasonCode;
+  lastServerRecoveryAttempt = attempt;
+  lastServerRecoveryPageState = state;
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  activeServerRecoveryDataUrl = buildServerRecoveryDataUrl({
+    locale: serverRecoveryLocale(),
+    state,
+    attempt,
+    reasonCode,
+  });
+  void mainWindow?.loadURL(activeServerRecoveryDataUrl);
+  mainWindow?.show();
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function serverRecoveryDiagnostics(): string {
+  const system = process.getSystemMemoryInfo();
+  return JSON.stringify({
+    schema: 1,
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    state: serverSupervisor.state,
+    safeMode: serverSupervisor.safeMode,
+    reason: lastServerFailureReason,
+    attempt: lastServerRecoveryAttempt,
+    exitCode: serverExitCode,
+    generation: activeServerGeneration,
+    systemMemoryKb: {
+      total: system.total,
+      free: system.free,
+      available: system.available,
+      swapTotal: system.swapTotal,
+      swapFree: system.swapFree,
+    },
+    utilityMemoryBytes: lastServerRuntimeMetrics
+      ? {
+          rss: lastServerRuntimeMetrics.rssBytes,
+          heapUsed: lastServerRuntimeMetrics.heapUsedBytes,
+          heapTotal: lastServerRuntimeMetrics.heapTotalBytes,
+          heapLimit: lastServerRuntimeMetrics.heapLimitBytes,
+          external: lastServerRuntimeMetrics.externalBytes,
+          arrayBuffers: lastServerRuntimeMetrics.arrayBuffersBytes,
+        }
+      : null,
+    electronUtilityMetric: lastServerProcessMetric,
+  }, null, 2);
+}
+
+async function runServerRecovery(initialGeneration: number, initialReason: string): Promise<void> {
+  let failedGeneration = initialGeneration;
+  let failureReason = initialReason;
+
+  for (;;) {
+    if (isQuitting || serverLifecyclePhase === 'quitting' || !serverPort) return;
+
+    const decision = serverSupervisor.recordUnexpectedExit();
+    const ownership = serverDescendantRegistries
+      .get(failedGeneration)
+      ?.evaluateRestartOwnership(isPidAlive)
+      ?? { allowed: true as const, reason: 'ownership_clear' as const, livePids: [] };
+
+    if (!ownership.allowed) {
+      serverSupervisor.markFailed();
+      console.warn('[server-supervisor] automatic restart blocked', {
+        generation: failedGeneration,
+        reason: ownership.reason,
+        liveDescendantCount: ownership.livePids.length,
+      });
+      showServerRecoveryPage('blocked', Math.min(decision.attempt, 3), ownership.reason);
+      return;
+    }
+    if (!decision.allowed || decision.delayMs === null) {
+      console.warn('[server-supervisor] automatic restart budget exhausted', {
+        generation: failedGeneration,
+        attempt: decision.attempt,
+      });
+      showServerRecoveryPage('failed', 3, decision.reason);
+      return;
+    }
+
+    showServerRecoveryPage('recovering', decision.attempt, failureReason);
+    console.warn('[server-supervisor] recovery scheduled', {
+      generation: failedGeneration,
+      attempt: decision.attempt,
+      delayMs: decision.delayMs,
+      safeMode: true,
+    });
+    await sleep(decision.delayMs);
+    if (isQuitting || serverLifecyclePhase === 'quitting' || !serverPort) return;
+
+    try {
+      serverSupervisor.markRecovering();
+      serverLifecyclePhase = 'recovering';
+      const recoveryChild = startServer(serverPort, true);
+      serverProcess = recoveryChild;
+      failedGeneration = activeServerGeneration;
+      await waitForServer(serverPort);
+      console.log('[server-supervisor] recovery healthy', {
+        generation: activeServerGeneration,
+        safeMode: true,
+      });
+      // Keep the offline surface visible briefly so safe-mode recovery is an
+      // honest user-visible state, then restore only a validated local route.
+      await sleep(750);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        activeServerRecoveryDataUrl = null;
+        await mainWindow.loadURL(`http://127.0.0.1:${serverPort}${lastRecoverableRoute}`);
+      }
+      serverSupervisor.markHealthy();
+      serverLifecyclePhase = 'running';
+      if (serverProcess !== recoveryChild || serverExited) {
+        // The exit handler may have queued this same generation after the
+        // phase flipped to running. This recovery loop already owns it.
+        queuedServerRecovery = null;
+        serverLifecyclePhase = 'recovering';
+        throw new Error('Recovered utility process exited before handoff');
+      }
+      startNativeDeliveryService();
+      return;
+    } catch (error) {
+      failureReason = 'safe_mode_restart_failed';
+      console.warn('[server-supervisor] recovery attempt failed', {
+        generation: failedGeneration,
+        reason: error instanceof Error ? error.name : 'unknown_error',
+      });
+      // Loop back through the same ownership and bounded-budget gates.
+    }
+  }
+}
+
+function finishServerRecoveryRun(): void {
+  serverRecoveryPromise = null;
+  const queued = queuedServerRecovery;
+  queuedServerRecovery = null;
+  if (queued && !isQuitting && serverLifecyclePhase === 'running') {
+    beginServerRecovery(queued.generation, queued.reason);
+  }
+}
+
+function beginServerRecovery(generation: number, reason: string): void {
+  if (isQuitting || serverLifecyclePhase !== 'running') return;
+  if (serverRecoveryPromise) {
+    queuedServerRecovery = { generation, reason };
+    return;
+  }
+  captureRecoverableRoute();
+  stopNativeDeliveryService();
+  serverLifecyclePhase = 'recovering';
+  serverRecoveryPromise = runServerRecovery(generation, reason).finally(finishServerRecoveryRun);
+}
+
+function retryServerRecoveryFromUser(): void {
+  if (serverRecoveryPromise || !serverPort || isQuitting) return;
+  serverSupervisor.resetRestartBudgetForManualRetry();
+  serverLifecyclePhase = 'recovering';
+  serverRecoveryPromise = runServerRecovery(activeServerGeneration, 'manual_retry')
+    .finally(finishServerRecoveryRun);
+}
+
+function startServer(port: number, recoverySafeMode = false): Electron.UtilityProcess {
   const standaloneDir = path.join(process.resourcesPath, 'standalone');
   const serverPath = path.join(standaloneDir, 'server.js');
 
@@ -970,6 +1210,15 @@ function startServer(port: number): Electron.UtilityProcess {
   serverErrors.clear();
   serverExited = false;
   serverExitCode = null;
+  lastServerRuntimeMetrics = null;
+  lastServerProcessMetric = null;
+  const generation = ++nextServerGeneration;
+  activeServerGeneration = generation;
+  serverDescendantRegistries.set(generation, new ServerDescendantRegistry(generation));
+  if (recoverySafeMode) serverSupervisor.markRecovering();
+  else serverSupervisor.markStarting();
+  let childFailureReason = 'server_exit';
+  let childFailureReported = false;
 
   const home = os.homedir();
   const constructedPath = getExpandedShellPath();
@@ -995,6 +1244,8 @@ function startServer(port: number): Electron.UtilityProcess {
       HOME: home,
       USERPROFILE: home,
       PATH: constructedPath,
+      CODEPILOT_SERVER_GENERATION: String(generation),
+      CODEPILOT_RECOVERY_SAFE_MODE: recoverySafeMode ? '1' : '0',
     },
     platform: process.platform,
   }) as Record<string, string>;
@@ -1006,6 +1257,110 @@ function startServer(port: number): Electron.UtilityProcess {
     cwd: standaloneDir,
     stdio: 'pipe',
     serviceName: 'codepilot-server',
+  });
+
+  const reportUtilityFailureOnce = (reason: string, exitCode?: number | null): void => {
+    if (
+      childFailureReported
+      || !electronTelemetry.enabled
+      || isDev
+      || isQuitting
+      || (serverLifecyclePhase !== 'running' && !recoverySafeMode)
+    ) return;
+    childFailureReported = true;
+    const system = process.getSystemMemoryInfo();
+    Sentry.captureEvent(buildUtilityProcessFailureEvent({
+      reason,
+      exitCode,
+      utilityRssBytes: lastServerRuntimeMetrics?.rssBytes,
+      utilityHeapUsedBytes: lastServerRuntimeMetrics?.heapUsedBytes,
+      utilityHeapTotalBytes: lastServerRuntimeMetrics?.heapTotalBytes,
+      utilityHeapLimitBytes: lastServerRuntimeMetrics?.heapLimitBytes,
+      utilityExternalBytes: lastServerRuntimeMetrics?.externalBytes,
+      utilityArrayBuffersBytes: lastServerRuntimeMetrics?.arrayBuffersBytes,
+      hostTotalKb: system.total,
+      hostFreeKb: system.free,
+      hostAvailableKb: system.available,
+      hostSwapTotalKb: system.swapTotal,
+      hostSwapFreeKb: system.swapFree,
+    }));
+  };
+
+  child.on('message', (rawMessage) => {
+    if (activeServerGeneration !== generation || serverProcess !== child) return;
+    const lifecycle = parseServerDescendantLifecycleMessage(rawMessage);
+    if (lifecycle) {
+      if (lifecycle.generation !== generation) return;
+      serverDescendantRegistries.get(generation)?.apply(lifecycle);
+      console.log('[server-lifecycle] descendant update', {
+        generation,
+        action: lifecycle.action,
+        role: lifecycle.role,
+        executableBasename: lifecycle.executableBasename,
+        descendantsVerifiable: lifecycle.descendantsVerifiable,
+      });
+      return;
+    }
+
+    const metrics = parseServerRuntimeObservabilityMessage(rawMessage);
+    if (!metrics || metrics.generation !== generation) return;
+    lastServerRuntimeMetrics = metrics;
+    const system = process.getSystemMemoryInfo();
+    const processMetric = child.pid
+      ? app.getAppMetrics().find((entry) => entry.pid === child.pid)
+      : undefined;
+    lastServerProcessMetric = processMetric
+      ? {
+          workingSetKb: processMetric.memory.workingSetSize,
+          peakWorkingSetKb: processMetric.memory.peakWorkingSetSize,
+          privateKb: processMetric.memory.privateBytes ?? null,
+          creationTime: processMetric.creationTime,
+          cpuPercent: processMetric.cpu.percentCPUUsage,
+        }
+      : null;
+    console.log('[server-observability] sample', {
+      generation,
+      utilityRssBytes: metrics.rssBytes,
+      utilityHeapUsedBytes: metrics.heapUsedBytes,
+      utilityHeapTotalBytes: metrics.heapTotalBytes,
+      utilityHeapLimitBytes: metrics.heapLimitBytes,
+      utilityExternalBytes: metrics.externalBytes,
+      utilityArrayBuffersBytes: metrics.arrayBuffersBytes,
+      electronWorkingSetKb: lastServerProcessMetric?.workingSetKb ?? null,
+      electronPeakWorkingSetKb: lastServerProcessMetric?.peakWorkingSetKb ?? null,
+      electronPrivateKb: lastServerProcessMetric?.privateKb ?? null,
+      electronCreationTime: lastServerProcessMetric?.creationTime ?? null,
+      electronCpuPercent: lastServerProcessMetric?.cpuPercent ?? null,
+      hostTotalKb: system.total,
+      hostFreeKb: system.free,
+      hostAvailableKb: system.available,
+      hostSwapTotalKb: system.swapTotal,
+      hostSwapFreeKb: system.swapFree,
+    });
+  });
+
+  child.on('error', (type, _location, report) => {
+    // Electron's native diagnostic report can contain command lines and paths.
+    // Persist only the typed event and the most recent allowlisted numeric
+    // sample; the raw report deliberately never enters the support log.
+    void report;
+    childFailureReason = type === 'FatalError' ? 'utility_fatal_error' : 'utility_error';
+    lastServerFailureReason = childFailureReason;
+    const system = process.getSystemMemoryInfo();
+    console.error('[server-supervisor] utility fatal error', {
+      generation,
+      type,
+      utilityRssBytes: lastServerRuntimeMetrics?.rssBytes ?? null,
+      utilityHeapUsedBytes: lastServerRuntimeMetrics?.heapUsedBytes ?? null,
+      utilityHeapTotalBytes: lastServerRuntimeMetrics?.heapTotalBytes ?? null,
+      utilityHeapLimitBytes: lastServerRuntimeMetrics?.heapLimitBytes ?? null,
+      hostTotalKb: system.total,
+      hostFreeKb: system.free,
+      hostAvailableKb: system.available,
+      hostSwapTotalKb: system.swapTotal,
+      hostSwapFreeKb: system.swapFree,
+    });
+    reportUtilityFailureOnce(childFailureReason);
   });
 
   child.stdout?.on('data', (data: Buffer) => {
@@ -1021,10 +1376,18 @@ function startServer(port: number): Electron.UtilityProcess {
   });
 
   child.on('exit', (code) => {
+    const reason = childFailureReason === 'server_exit' ? `server_exit_${code}` : childFailureReason;
     console.log(`Server process exited with code ${code}`);
     serverExited = true;
     serverExitCode = code;
-    serverProcess = null;
+    if (serverProcess === child) serverProcess = null;
+    reportUtilityFailureOnce(
+      childFailureReason === 'server_exit' ? 'unexpected_exit' : childFailureReason,
+      code,
+    );
+    if (!isDev && !isQuitting && serverLifecyclePhase === 'running') {
+      beginServerRecovery(generation, reason);
+    }
   });
 
   return child;
@@ -1666,32 +2029,46 @@ app.whenReady().then(async () => {
   userShellEnv = loadUserShellEnv();
 
   // Electron owns OS credential-store access. The standalone Next child gets
-  // only the in-memory data-encryption key; the database never stores it.
-  const macosKeychainProbe = getMacosDefaultKeychainProbe();
-  const macosSecurityShimDir = app.isPackaged
-    ? path.join(process.resourcesPath, 'macos-keychain-guard')
-    : path.join(app.getAppPath(), 'resources', 'macos-keychain-guard');
-  macosKeychainEnvironment = buildMacosKeychainEnvironment(
-    macosKeychainProbe,
-    macosSecurityShimDir,
-  );
-
-  if (macosKeychainProbe.status === 'unavailable') {
+  // only the in-memory data-encryption key; the database never stores it. A
+  // packaged recovery smoke may bypass this only when its userData is under
+  // the dedicated disposable temp root, so an ad-hoc test build never touches
+  // the developer's real `CodePilot Safe Storage` item.
+  const skipProviderSecretForSmoke = shouldSkipProviderSecretForIsolatedSmoke({
+    flag: process.env[PROVIDER_SECRET_ISOLATED_SMOKE_ENV],
+    isPackaged: app.isPackaged,
+    userDataDir: app.getPath('userData'),
+  });
+  if (skipProviderSecretForSmoke) {
     providerSecretEnvironment = {};
-    console.warn(
-      `[macos-keychain] default keychain unavailable; noninteractive guard enabled; reason=${macosKeychainProbe.reason}`,
-    );
-    console.warn('[provider-secret] safeStorage skipped; legacy provider secrets will not be migrated');
+    macosKeychainEnvironment = {};
+    console.warn('[provider-secret] safeStorage skipped for isolated packaged recovery smoke');
   } else {
-    try {
-      providerSecretEnvironment = initializeProviderSecretEnvironment(app.getPath('userData'));
-      console.log(
-        `[provider-secret] backend=${providerSecretEnvironment.CODEPILOT_PROVIDER_SECRET_BACKEND} `
-        + `level=${providerSecretEnvironment.CODEPILOT_PROVIDER_SECRET_LEVEL}`,
-      );
-    } catch (error) {
+    const macosKeychainProbe = getMacosDefaultKeychainProbe();
+    const macosSecurityShimDir = app.isPackaged
+      ? path.join(process.resourcesPath, 'macos-keychain-guard')
+      : path.join(app.getAppPath(), 'resources', 'macos-keychain-guard');
+    macosKeychainEnvironment = buildMacosKeychainEnvironment(
+      macosKeychainProbe,
+      macosSecurityShimDir,
+    );
+
+    if (macosKeychainProbe.status === 'unavailable') {
       providerSecretEnvironment = {};
-      console.warn('[provider-secret] OS-protected storage unavailable; legacy provider secrets will not be migrated', error);
+      console.warn(
+        `[macos-keychain] default keychain unavailable; noninteractive guard enabled; reason=${macosKeychainProbe.reason}`,
+      );
+      console.warn('[provider-secret] safeStorage skipped; legacy provider secrets will not be migrated');
+    } else {
+      try {
+        providerSecretEnvironment = initializeProviderSecretEnvironment(app.getPath('userData'));
+        console.log(
+          `[provider-secret] backend=${providerSecretEnvironment.CODEPILOT_PROVIDER_SECRET_BACKEND} `
+          + `level=${providerSecretEnvironment.CODEPILOT_PROVIDER_SECRET_LEVEL}`,
+        );
+      } catch (error) {
+        providerSecretEnvironment = {};
+        console.warn('[provider-secret] OS-protected storage unavailable; legacy provider secrets will not be migrated', error);
+      }
     }
   }
 
@@ -2720,6 +3097,49 @@ app.whenReady().then(async () => {
     }
   });
 
+  const isTrustedServerRecoverySender = (event: Electron.IpcMainInvokeEvent): boolean => (
+    !!mainWindow
+    && !mainWindow.isDestroyed()
+    && activeServerRecoveryDataUrl !== null
+    && event.sender === mainWindow.webContents
+    && event.sender.getURL() === activeServerRecoveryDataUrl
+  );
+  ipcMain.handle('server-recovery:copy-diagnostics', (event) => {
+    if (!isTrustedServerRecoverySender(event)) return false;
+    clipboard.writeText(serverRecoveryDiagnostics());
+    return true;
+  });
+  ipcMain.handle('server-recovery:retry', (event) => {
+    if (!isTrustedServerRecoverySender(event)) return false;
+    retryServerRecoveryFromUser();
+    return true;
+  });
+  ipcMain.handle('server-recovery:restart-app', (event) => {
+    if (
+      !isTrustedServerRecoverySender(event)
+      || lastServerRecoveryPageState === 'blocked'
+    ) return false;
+    isQuitting = true;
+    serverLifecyclePhase = 'quitting';
+    app.relaunch();
+    app.quit();
+    return true;
+  });
+  ipcMain.handle('server-recovery:quit-app', (event) => {
+    if (
+      !isTrustedServerRecoverySender(event)
+      || lastServerRecoveryPageState !== 'blocked'
+    ) return false;
+    // Blocked page only. The descendant registry lives in this Main's memory
+    // and cannot prove single ownership across a process restart, so the safe
+    // exit is a plain quit — the user cleans up any remaining Codex process
+    // (or reboots) and reopens the app manually. This handler must never
+    // restart the process itself.
+    serverLifecyclePhase = 'quitting';
+    quitApp();
+    return true;
+  });
+
   try {
     let port: number;
 
@@ -2751,6 +3171,8 @@ app.whenReady().then(async () => {
       // race window from the previous "probe-then-release" approach.
       port = await startServerOnStablePort();
       serverPort = port;
+      serverSupervisor.markHealthy();
+      serverLifecyclePhase = 'running';
       console.log('Server is ready');
       if (mainWindow) {
         mainWindow.loadURL(`http://127.0.0.1:${port}`);
@@ -2814,12 +3236,21 @@ app.on('activate', async () => {
     return;
   }
 
+  // Recreating a destroyed window must never bypass a failed/recovering
+  // supervisor and silently launch a normal-mode utility process.
+  if (!isDev && (serverLifecyclePhase === 'recovering' || serverSupervisor.state === 'failed')) {
+    showMainWindow();
+    return;
+  }
+
   try {
     if (!isDev && !serverProcess) {
       // Show loading window immediately so user sees progress
       createWindow();
       const port = await startServerOnStablePort();
       serverPort = port;
+      serverSupervisor.markHealthy();
+      serverLifecyclePhase = 'running';
       startNativeDeliveryService();
       if (mainWindow) {
         mainWindow.loadURL(`http://127.0.0.1:${port}`);
@@ -2844,6 +3275,9 @@ app.on('before-quit', async (e) => {
   // `isQuitting` flag also tells the main window's `close` handler to let
   // the close go through instead of hiding.
   isQuitting = true;
+  serverLifecyclePhase = 'quitting';
+  serverSupervisor.markStopped();
+  stopNativeDeliveryService();
 
   // Kill all terminal processes
   terminalManager.killAll();

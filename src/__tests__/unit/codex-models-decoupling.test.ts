@@ -49,7 +49,7 @@ function fakeAppServer(behavior: 'ok' | 'hang' | 'throw') {
       if (behavior === 'throw') throw new Error('spawn refused (fake)');
       return {
         client: {
-          request: <T>(_method: string, _params?: unknown): Promise<T> => {
+          request: <T>(): Promise<T> => {
             if (behavior === 'hang') return new Promise<T>(() => { /* never resolves */ });
             return Promise.resolve(MODELS_RESULT as T);
           },
@@ -75,6 +75,62 @@ describe('listCodexModels — P0.3 spawn decoupling', () => {
     const start = Date.now();
     await assert.rejects(listCodexModels({ timeoutMs: 150 }, fake.get), /timed out/);
     assert.ok(Date.now() - start < 1500, 'must reject near the timeout, not hang');
+  });
+
+  it('aborts the underlying model/list RPC at the same deadline', async () => {
+    let observedAbort = false;
+    const get = async () => ({
+      client: {
+        request: <T>(
+          _method: string,
+          _params?: unknown,
+          options?: { signal?: AbortSignal },
+        ): Promise<T> => new Promise<T>((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            observedAbort = true;
+            reject(new Error('underlying aborted'));
+          }, { once: true });
+        }),
+      },
+    });
+    await assert.rejects(listCodexModels({ timeoutMs: 40 }, get), /timed out/);
+    assert.equal(observedAbort, true);
+  });
+
+  it('shares one server-side model/list across ten concurrent callers', async () => {
+    let getCalls = 0;
+    let requestCalls = 0;
+    const get = async () => {
+      getCalls += 1;
+      return {
+        client: {
+          request: async <T>() => {
+            requestCalls += 1;
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            return MODELS_RESULT as T;
+          },
+        },
+      };
+    };
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => listCodexModels({ timeoutMs: 500 }, get)),
+    );
+    assert.equal(getCalls, 1);
+    assert.equal(requestCalls, 1);
+    assert.ok(results.every((models) => models[0]?.id === 'gpt-5.5'));
+  });
+
+  it('enters cooldown after failure and explicit force bypasses it', async () => {
+    const hung = fakeAppServer('hang');
+    await assert.rejects(listCodexModels({ timeoutMs: 30 }, hung.get), /timed out/);
+
+    const healthy = fakeAppServer('ok');
+    await assert.rejects(listCodexModels({}, healthy.get), /cooling down/);
+    assert.equal(healthy.calls(), 0, 'cooldown must not touch the app-server');
+
+    const models = await listCodexModels({ force: true }, healthy.get);
+    assert.equal(models[0]?.id, 'gpt-5.5');
+    assert.equal(healthy.calls(), 1);
   });
 
   it('returns mapped models on the happy path', async () => {
@@ -139,6 +195,10 @@ describe('providers/models route — P0.3 spawn-policy source pins', () => {
       /runtimeFilter === 'codex_runtime'[\s\S]{0,400}timeoutMs:/,
       'the codex_runtime branch must pass a timeoutMs so a slow app-server degrades instead of hanging',
     );
+  });
+
+  it('recovery safe mode makes the codex_runtime path cache-only', () => {
+    assert.match(routeSrc, /isServerRecoverySafeMode\(\)[\s\S]{0,160}cacheOnly:\s*true/);
   });
 
   it('never calls buildCodexProviderModelGroup with no options (the old unconditional spawn)', () => {

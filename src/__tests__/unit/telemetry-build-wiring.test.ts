@@ -19,6 +19,11 @@ describe('telemetry release wiring', () => {
     assert.match(main, /attachScreenshot:\s*false/);
     assert.match(main, /configureElectronMainIntegrations\(/);
     assert.match(main, /mainProcessSessionIntegration\(\{\s*sendOnCreate:\s*true\s*\}\)/);
+    assert.match(
+      main,
+      /childProcessIntegration\(\{\s*events:\s*\[\]\s*\}\)/,
+      'SDK ChildProcess breadcrumbs stay enabled, but its automatic Issue events must be disabled',
+    );
   });
 
   it('keeps auth tokens server-only and source maps private', () => {

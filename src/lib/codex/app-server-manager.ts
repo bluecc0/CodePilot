@@ -18,9 +18,10 @@
  */
 
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, posix as posixPath, win32 as win32Path } from 'node:path';
+import { basename, dirname, join, posix as posixPath, win32 as win32Path } from 'node:path';
 import { CodexAppServerClient, type CodexTransport } from './app-server-client';
 import type { CodexAvailability } from './types';
 import { shouldDropCodexTraceLine, resolveCodexRustLog } from './codex-trace-filter';
@@ -33,9 +34,69 @@ import {
   buildProxySafeEnvironment,
   type ProxyProcessEnvironment,
 } from '../process-proxy-env';
+import {
+  BoundedNdjsonReader,
+  CodexProtocolFrameTooLargeError,
+  DEFAULT_CODEX_FRAME_LIMIT_BYTES,
+} from './bounded-ndjson-reader';
+import {
+  SERVER_LIFECYCLE_CHANNEL,
+  SERVER_LIFECYCLE_VERSION,
+  type ServerDescendantLifecycleMessage,
+} from '../server-lifecycle-contract';
+import { isServerRecoverySafeMode } from '../server-recovery-safe-mode';
 
 interface SpawnedTransport extends CodexTransport {
   readonly proc: ChildProcessWithoutNullStreams;
+}
+
+type ElectronUtilityParentPort = {
+  postMessage: (message: unknown) => void;
+};
+
+function postCodexAppServerLifecycle(
+  action: ServerDescendantLifecycleMessage['action'],
+  pid: number,
+  startIdentity: string,
+  executableBasename: string,
+): void {
+  const generation = Number.parseInt(process.env.CODEPILOT_SERVER_GENERATION ?? '', 10);
+  const parentPort = (process as NodeJS.Process & { parentPort?: ElectronUtilityParentPort }).parentPort;
+  if (!Number.isSafeInteger(generation) || generation <= 0 || !parentPort) return;
+  const message: ServerDescendantLifecycleMessage = {
+    channel: SERVER_LIFECYCLE_CHANNEL,
+    version: SERVER_LIFECYCLE_VERSION,
+    generation,
+    action,
+    role: 'codex-app-server',
+    pid,
+    startIdentity,
+    executableBasename,
+    // Codex may create children inside its Rust runtime. CodePilot cannot
+    // enumerate those reliably on every platform, so Main must fail closed
+    // after an abrupt utility-process exit instead of assuming single owner.
+    descendantsVerifiable: false,
+  };
+  try { parentPort.postMessage(message); } catch { /* not an Electron utility process */ }
+}
+
+const CODEX_HEALTH_SIGNAL_WINDOW_MS = 10 * 60_000;
+const CODEX_HEALTH_SIGNAL_THRESHOLD = 3;
+
+export function appendCodexHealthSignal(
+  signalTimes: readonly number[],
+  now: number,
+): { signalTimes: number[]; unhealthy: boolean } {
+  const next = signalTimes.filter((at) => now - at <= CODEX_HEALTH_SIGNAL_WINDOW_MS);
+  next.push(now);
+  return { signalTimes: next, unhealthy: next.length >= CODEX_HEALTH_SIGNAL_THRESHOLD };
+}
+
+interface AppServerHealthState {
+  generation: number;
+  activeTurnIds: Set<string>;
+  signalTimes: number[];
+  unhealthyReason: string | null;
 }
 
 /**
@@ -62,12 +123,22 @@ export function isFatalCodexConfigStderr(chunk: string): boolean {
   return /unknown variant/i.test(chunk) && /config|deserializ/i.test(chunk);
 }
 
+export function isCodexModelRefreshTimeoutStderr(chunk: string): boolean {
+  return /codex_models_manager::manager/i.test(chunk)
+    && /failed to refresh available models/i.test(chunk)
+    && /timeout waiting for child process to exit/i.test(chunk);
+}
+
 /**
  * Wrap a spawned child process in the CodexTransport interface.
  * Buffers partial stdout lines until newline.
  */
-function makeStdioTransport(proc: ChildProcessWithoutNullStreams): SpawnedTransport {
-  let buffer = '';
+function makeStdioTransport(
+  proc: ChildProcessWithoutNullStreams,
+  onHealthSignal?: (reason: string) => void,
+): SpawnedTransport {
+  const stdoutReader = new BoundedNdjsonReader(DEFAULT_CODEX_FRAME_LIMIT_BYTES);
+  let reportedFrameHighWater = 0;
   let messageHandler: ((line: string) => void) | null = null;
   const closeHandlers = new Set<(reason?: Error) => void>();
   let closed = false;
@@ -93,18 +164,34 @@ function makeStdioTransport(proc: ChildProcessWithoutNullStreams): SpawnedTransp
     fireClose(err instanceof Error ? err : new Error(String(err)));
   });
 
-  proc.stdout.setEncoding('utf8');
-  proc.stdout.on('data', (chunk: string) => {
-    buffer += chunk;
-    let newlineIdx = buffer.indexOf('\n');
-    while (newlineIdx !== -1) {
-      const line = buffer.slice(0, newlineIdx);
-      buffer = buffer.slice(newlineIdx + 1);
-      const trimmed = line.trim();
-      if (trimmed && messageHandler) {
-        messageHandler(trimmed);
+  proc.stdout.on('data', (chunk: Buffer) => {
+    if (closed) return;
+    try {
+      for (const frame of stdoutReader.push(chunk)) {
+        const trimmed = frame.text.trim();
+        if (trimmed && messageHandler) messageHandler(trimmed);
       }
-      newlineIdx = buffer.indexOf('\n');
+      const highWater = Math.max(
+        stdoutReader.currentFrameBytes,
+        stdoutReader.completedFrameHighWaterBytes,
+      );
+      // Low-frequency, content-free frame telemetry. Report only when crossing
+      // the next MiB power-of-two boundary; ordinary small RPCs stay silent.
+      if (highWater >= 1024 * 1024 && highWater >= Math.max(1024 * 1024, reportedFrameHighWater * 2)) {
+        reportedFrameHighWater = highWater;
+        console.warn('[codex.app-server] stdout frame high-water', { bytes: highWater });
+      }
+    } catch (error) {
+      const reason = error instanceof CodexProtocolFrameTooLargeError
+        ? error
+        : new Error('Codex protocol stdout frame decode failed');
+      console.warn('[codex.app-server] closing oversized/invalid stdout frame', {
+        code: error instanceof CodexProtocolFrameTooLargeError ? error.code : 'CODEX_PROTOCOL_FRAME_INVALID',
+        bytes: error instanceof CodexProtocolFrameTooLargeError ? error.frameBytes : stdoutReader.currentFrameBytes,
+        maxBytes: DEFAULT_CODEX_FRAME_LIMIT_BYTES,
+      });
+      fireClose(reason);
+      try { proc.kill('SIGKILL'); } catch { /* already gone */ }
     }
   });
 
@@ -130,6 +217,9 @@ function makeStdioTransport(proc: ChildProcessWithoutNullStreams): SpawnedTransp
       console.warn('[codex.app-server] fatal config error on stderr — failing fast + killing child:', fatalLine);
       fireClose(new Error(`Codex app-server fatal config error: ${fatalLine.trim()}`));
       try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+    if (isCodexModelRefreshTimeoutStderr(chunk)) {
+      onHealthSignal?.('models_refresh_timeout');
     }
   });
 
@@ -163,6 +253,7 @@ function makeStdioTransport(proc: ChildProcessWithoutNullStreams): SpawnedTransp
     },
     async close() {
       messageHandler = null;
+      stdoutReader.reset();
       // Already exited (self-exit / crash) — nothing to wait for. Without
       // this guard we'd block on a `proc.once('exit')` that has already
       // fired and only resolve after the 2s SIGTERM fallback, adding 2s to
@@ -643,10 +734,114 @@ interface ManagedAppServer {
   readonly client: CodexAppServerClient;
   readonly transport: SpawnedTransport;
   readonly availability: CodexAvailability;
+  readonly generation: number;
 }
 
 let cached: Promise<ManagedAppServer> | null = null;
 let lastAvailability: CodexAvailability = { kind: 'unknown' };
+let nextAppServerGeneration = 0;
+let currentHealthState: AppServerHealthState | null = null;
+let recyclePromise: Promise<boolean> | null = null;
+
+function extractTurnId(params: unknown): string | null {
+  if (!params || typeof params !== 'object') return null;
+  const record = params as Record<string, unknown>;
+  if (typeof record.turnId === 'string') return record.turnId;
+  if (record.turn && typeof record.turn === 'object') {
+    const id = (record.turn as Record<string, unknown>).id;
+    if (typeof id === 'string') return id;
+  }
+  return null;
+}
+
+function observeAppServerActivity(
+  health: AppServerHealthState,
+  method: string,
+  params: unknown,
+): void {
+  const turnId = extractTurnId(params);
+  if (method === 'turn/started' && turnId) {
+    health.activeTurnIds.add(turnId);
+    return;
+  }
+  if ((method === 'turn/completed' || method === 'turn/cancelled') && turnId) {
+    health.activeTurnIds.delete(turnId);
+    if (health.unhealthyReason) void recycleUnhealthyCodexAppServerIfIdle();
+  }
+}
+
+function recordAppServerHealthSignal(generation: number, reason: string): void {
+  const health = currentHealthState;
+  if (!health || health.generation !== generation) return;
+  const now = Date.now();
+  const recorded = appendCodexHealthSignal(health.signalTimes, now);
+  health.signalTimes = recorded.signalTimes;
+  console.warn('[codex.app-server] health signal', {
+    generation,
+    reason,
+    count: health.signalTimes.length,
+    windowMs: CODEX_HEALTH_SIGNAL_WINDOW_MS,
+  });
+  if (recorded.unhealthy) {
+    markCodexAppServerUnhealthy(reason);
+  }
+}
+
+/** Mark the shared app-server unhealthy. It is recycled only when no active
+ * turn is observed; ambiguous activity fails closed and leaves it degraded. */
+export function markCodexAppServerUnhealthy(reason: string): void {
+  const health = currentHealthState;
+  if (!health) return;
+  health.unhealthyReason = reason;
+  console.warn('[codex.app-server] marked unhealthy', {
+    generation: health.generation,
+    reason,
+    activeTurns: health.activeTurnIds.size,
+  });
+  void recycleUnhealthyCodexAppServerIfIdle();
+}
+
+export function recycleUnhealthyCodexAppServerIfIdle(): Promise<boolean> {
+  if (recyclePromise) return recyclePromise;
+  const health = currentHealthState;
+  const current = cached;
+  if (!health || !health.unhealthyReason || health.activeTurnIds.size > 0 || !current) {
+    return Promise.resolve(false);
+  }
+
+  recyclePromise = (async () => {
+    let managed: ManagedAppServer;
+    try {
+      managed = await current;
+    } catch {
+      if (cached === current) cached = null;
+      return false;
+    }
+    if (
+      currentHealthState !== health
+      || managed.generation !== health.generation
+      || health.activeTurnIds.size > 0
+    ) {
+      return false;
+    }
+    if (cached === current) cached = null;
+    console.warn('[codex.app-server] recycling unhealthy idle instance', {
+      generation: health.generation,
+      reason: health.unhealthyReason,
+    });
+    await managed.client.dispose().catch(() => undefined);
+    if (currentHealthState === health) currentHealthState = null;
+    lastAvailability = {
+      kind: 'spawn_failed',
+      reason: `unhealthy instance recycled: ${health.unhealthyReason}`,
+      binary: managed.availability.kind === 'ready' ? managed.availability.binary : undefined,
+    };
+    return true;
+  })().finally(() => {
+    recyclePromise = null;
+  });
+  return recyclePromise;
+}
 
 /**
  * Build the Codex child environment at the final process boundary.
@@ -695,6 +890,10 @@ export function buildCodexAppServerArgs(codexHome: string): string[] {
  * they want a non-throwing path.
  */
 export async function getCodexAppServer(): Promise<ManagedAppServer> {
+  if (isServerRecoverySafeMode()) {
+    throw new Error('Codex app-server is disabled while CodePilot is in recovery safe mode');
+  }
+  if (recyclePromise) await recyclePromise;
   if (cached) return cached;
 
   const binary = findCodexBinary();
@@ -706,7 +905,18 @@ export async function getCodexAppServer(): Promise<ManagedAppServer> {
   }
 
   cached = (async (): Promise<ManagedAppServer> => {
+    const generation = ++nextAppServerGeneration;
+    const health: AppServerHealthState = {
+      generation,
+      activeTurnIds: new Set(),
+      signalTimes: [],
+      unhealthyReason: null,
+    };
+    currentHealthState = health;
     let proc: ChildProcessWithoutNullStreams;
+    let registeredPid: number | null = null;
+    const lifecycleStartIdentity = randomUUID();
+    const executableBasename = basename(binary);
     try {
       const preparedHome = prepareCodePilotCodexHome();
       // Windows `.cmd`/`.bat` shims can't be spawned directly (EINVAL) — run
@@ -745,14 +955,28 @@ export async function getCodexAppServer(): Promise<ManagedAppServer> {
         windowsVerbatimArguments: launch.windowsVerbatimArguments,
         env: buildCodexAppServerEnv(process.env, process.platform, preparedHome.codexHome),
       });
+      proc.once('spawn', () => {
+        registeredPid = proc.pid ?? null;
+        if (registeredPid) {
+          postCodexAppServerLifecycle(
+            'register',
+            registeredPid,
+            lifecycleStartIdentity,
+            executableBasename,
+          );
+        }
+      });
     } catch (err) {
       cached = null;
+      if (currentHealthState === health) currentHealthState = null;
       const reason = err instanceof Error ? err.message : String(err);
       lastAvailability = { kind: 'spawn_failed', reason, binary };
       throw new Error(`Codex app-server spawn failed: ${reason}`);
     }
 
-    const transport = makeStdioTransport(proc);
+    const transport = makeStdioTransport(proc, (reason) => {
+      recordAppServerHealthSignal(generation, reason);
+    });
     const version = await readCodePilotVersion();
     const client = new CodexAppServerClient(transport, {
       version,
@@ -768,14 +992,24 @@ export async function getCodexAppServer(): Promise<ManagedAppServer> {
     });
     client.onAnyNotification((method, params) => {
       observeCodexSandboxNotification(method, params);
+      observeAppServerActivity(health, method, params);
     });
 
     // Listen for unexpected exit so the cache stays accurate.
     proc.once('exit', (code, signal) => {
+      if (registeredPid) {
+        postCodexAppServerLifecycle(
+          'unregister',
+          registeredPid,
+          lifecycleStartIdentity,
+          executableBasename,
+        );
+      }
       console.warn('[codex.app-server] exited', { code, signal });
-      if (cached) {
+      if (currentHealthState === health) {
         // Invalidate the cache so the next caller respawns.
         cached = null;
+        currentHealthState = null;
       }
       lastAvailability = {
         kind: 'spawn_failed',
@@ -792,9 +1026,10 @@ export async function getCodexAppServer(): Promise<ManagedAppServer> {
         codexHome: init.codexHome,
         binary,
       };
-      return { client, transport, availability: lastAvailability };
+      return { client, transport, availability: lastAvailability, generation };
     } catch (err) {
       cached = null;
+      if (currentHealthState === health) currentHealthState = null;
       await transport.close().catch(() => undefined);
       const reason = err instanceof Error ? err.message : String(err);
       lastAvailability = { kind: 'spawn_failed', reason, binary };
@@ -855,6 +1090,7 @@ export async function disposeCodexAppServer(): Promise<void> {
     return;
   }
   cached = null;
+  currentHealthState = null;
   resetCodexSandboxReadiness();
   try {
     const { client } = await current;
@@ -898,6 +1134,9 @@ async function readCodePilotVersion(): Promise<string> {
 export function __resetForTest(): void {
   cached = null;
   lastAvailability = { kind: 'unknown' };
+  nextAppServerGeneration = 0;
+  currentHealthState = null;
+  recyclePromise = null;
   resolvedBinaryCache = null;
   versionProbeCache = null;
 }

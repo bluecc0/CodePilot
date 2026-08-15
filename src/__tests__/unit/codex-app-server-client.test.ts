@@ -176,6 +176,51 @@ describe('CodexAppServerClient — request / response', () => {
     assert.equal(mock.sent.length, 3);
     await client.dispose();
   });
+
+  it('aborts one pending RPC at the caller deadline and drops a late response', async () => {
+    const mock = makeMockTransport();
+    const client = new CodexAppServerClient(mock.transport, {
+      version: '0.0.0',
+      requestTimeoutMs: 30_000,
+    });
+    const controller = new AbortController();
+    const promise = client.request('model/list', {}, { signal: controller.signal });
+    await mock.flush();
+    const request = JSON.parse(mock.sent[0]);
+    controller.abort();
+    await assert.rejects(promise, (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, 'AbortError');
+      assert.match(error.message, /model\/list/);
+      return true;
+    });
+
+    // A response that arrives after cancellation is ignored and must not affect
+    // a subsequent request that uses a new id.
+    mock.emit(JSON.stringify({ id: request.id, result: { stale: true } }));
+    const next = client.request<{ ok: true }>('model/list');
+    await mock.flush();
+    const nextRequest = JSON.parse(mock.sent[1]);
+    assert.notEqual(nextRequest.id, request.id);
+    mock.emit(JSON.stringify({ id: nextRequest.id, result: { ok: true } }));
+    assert.deepEqual(await next, { ok: true });
+    await client.dispose();
+  });
+
+  it('honors a per-call timeout shorter than the client default', async () => {
+    const mock = makeMockTransport();
+    const client = new CodexAppServerClient(mock.transport, {
+      version: '0.0.0',
+      requestTimeoutMs: 30_000,
+    });
+    const start = Date.now();
+    await assert.rejects(
+      client.request('model/list', {}, { timeoutMs: 40 }),
+      /Codex RPC timeout: model\/list/,
+    );
+    assert.ok(Date.now() - start < 1_000);
+    await client.dispose();
+  });
 });
 
 describe('CodexAppServerClient — notifications', () => {

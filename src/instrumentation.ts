@@ -83,6 +83,11 @@ export async function register() {
     const { initRuntimeLog } = await import('@/lib/runtime-log');
     initRuntimeLog();
 
+    // Packaged Electron utility processes report only numeric memory facts to
+    // Main. In next dev there is no Electron parentPort, so this is a no-op.
+    const { startServerRuntimeObservability } = await import('@/lib/server-runtime-observability');
+    startServerRuntimeObservability();
+
     // Reconcile assistant heartbeat desired state before the scheduler starts
     // scanning due rows. This repairs missing/drifted rows on cold boot and
     // removes disabled rows without waiting for the Settings page to open.
@@ -92,8 +97,14 @@ export async function register() {
       console.warn('[heartbeat] startup reconciliation blocked:', heartbeat.reason);
     }
 
-    // Start the task scheduler so persisted tasks resume on cold boot.
-    const { ensureSchedulerRunning } = await import('@/lib/task-scheduler');
-    ensureSchedulerRunning();
+    // A replacement utility process must settle durable interrupted state but
+    // must not automatically relaunch scheduled AI work. Normal app restart
+    // clears the Main-owned safe-mode environment.
+    if (process.env.CODEPILOT_RECOVERY_SAFE_MODE !== '1') {
+      const { ensureSchedulerRunning } = await import('@/lib/task-scheduler');
+      ensureSchedulerRunning();
+    } else {
+      console.warn('[server-recovery] scheduler suppressed in safe mode');
+    }
   }
 }

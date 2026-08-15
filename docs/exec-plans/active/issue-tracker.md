@@ -1,7 +1,7 @@
 # Issue Tracker — 统一问题跟踪
 
 > 创建时间：2026-04-13
-> 最后更新：2026-07-20（Codex CLI/登录发布 smoke 回写；B-029 打包污染与签名阻断已修复）
+> 最后更新：2026-08-13（v0.66.2 official-signed 跨平台 CI 与 12-asset Release 已发布；真实用户 cohort / 旧 ad-hoc ACL 迁移待观察）
 > 合并自：`open-issues-2026-03-12.md` + `v0.48-post-release-issues.md` + GitHub Issues 最新盘点
 
 **AI 须知：**
@@ -195,6 +195,17 @@ GitHub milestone `v0.56.x Stability / Trust`（#1）+ P0/P1 label 体系已建�
 - **修复:** Electron production build 先精确清理 `release/.next/dist-electron`；动态 HOME 扫描增加 Turbopack ignore 边界；Next build 后以严格根目录 allowlist 只保留 `.next`、`node_modules`、`server.js`、`package.json`、`cache-handler.js`，移除其余误追踪内容并 fail-closed 复核。新增 4 条行为/合同测试覆盖安全清理、泄漏阻断、最小 allowlist 与构建顺序。
 - **验证:** 最终 0.58.2 arm64 `.app` 的 standalone 只有 Next runtime 5 项，electron-builder 额外加入受控 `public/themes`；包内无本地 DB、上传、`.codepilot/.claude/.git`。`codesign --verify --deep --strict` 通过；DMG `hdiutil verify` 通过；隔离启动最终 packaged server 后 health 200，Codex status GET/POST 均真实选中 ChatGPT.app CLI。生成 `CodePilot-0.58.2-arm64.dmg` 与 `.zip`，B-029 不再阻断发布。
 
+#### B-030 Codex 模型刷新异常后 Next utility process OOM，历史对话/文件树失活并灰屏
+- **状态:** 🟡 Mitigations shipped in v0.66.2 / Tests pass / Crash smoke passed / Review passed（2026-08-13 official-signed 跨平台 package gates 与 Release 已通过；2026-08-12 Claude 复核 follow-up `accepted`。P2“SDK ChildProcess abnormal-exit 双报”已修：保留 breadcrumb、`events:[]` 关闭自动 Issue；两条 P3 亦闭环：final `codesign` 15s/60s 硬超时，utility 负 exit code 按平台有界整数保留。2026-08-11/12 ad-hoc arm64 `.app` 的 kill ×1、三次自动重启预算耗尽（第4次 crash 停止）及 live-Codex blocked/quit-only 均通过。持久化 registry 记 tech-debt #85）；根因按 F 类“本地未复现”保持开放，active-turn UI、15/60 分钟 soak 与 stable Sentry cohort 未完成，不能称根因已修复
+- **计划:** [codex-model-refresh-utility-process-oom-recovery.md](codex-model-refresh-utility-process-oom-recovery.md)
+- **现象:** macOS v0.66 用户点击历史会话后中心显示 `Failed to fetch`、文件树显示 `Failed to load file tree`；再次进入或刷新后只剩透明/灰色窗口。完全退出重开可短暂恢复，但数十秒到数分钟后重复。
+- **确定证据:** 用户脱敏主日志在约 12 分钟内记录四次 `OOM error in V8: Zone Allocation failed - process out of memory`；Next server exit code 5，Electron breadcrumb 为 `child-process-gone type=Utility reason=crashed`，随后本地稳定端口持续 `ECONNREFUSED`，chat URL `ERR_CONNECTION_REFUSED`。GC 前 child heap 约 354–360MB，部分 total 约 428MB。
+- **已排除:** 不是历史消息损坏的必要结果——fresh `test` 明确 `historyMessageCount: 0` 仍 OOM；不是 Provider 401 的必要结果——前三次未发送新消息已崩溃；不是旧 B-025 日志洪水——本次 `serverErrors` ring 只有约 1.2–8.8KB。
+- **高相关前置信号:** 同一运行在首个 OOM 前约四小时至少十二次出现 `codex_models_manager::manager: failed to refresh available models: timeout waiting for child process to exit`；上游 `openai/codex#34397` 有同形周期性 hang 报告。但 exact allocator / orphan / oversized frame 尚未定案。
+- **已落地:** Codex stdout 改为 copy-before-cap 的 32 MiB byte-bounded NDJSON reader；`model/list` deadline abort、server-side single-flight、5 秒 cooldown、连续三次 signal 后 unhealthy idle recycle；Main-owned recovery safe mode 禁止 replacement server 启动 Codex/scheduler，并在 Chat 明示且禁发。Electron Main 新增 1s/2s/4s 有界 supervisor、stable-port health gate、poll pause/resume、self-contained recovery page、脱敏诊断、恢复交接 queue 与 current-generation descendant registry；live/PID-reuse/unverifiable tree 一律不 kill、fail-closed。2026-08-12 再补 stable opt-in、每 generation 一次的 utility fatal normalized Sentry event（只含稳定枚举和数值，raw report 丢弃）；SDK `ChildProcess` 保留 breadcrumb 但关闭自动 event，避免 `abnormal-exit` 双报；exit code 使用独立平台有界整数合同。最终 Developer ID verifier 的 `codesign` inspect/deep verify 有 15s/60s 进程级硬超时。Electron 40.2.1 升到同主版本 40.10.6。
+- **验证:** 原实现轮相关 transport/model/supervisor/registry/offline-page 定向测试 108/108，全量 `npm run test` 5179 pass / 0 fail / 1 skip（5180 tests）；`npm run build`、`npm run electron:build` 通过；禁用 Developer ID 自动发现后完整生成 ad-hoc signed arm64 目录包，deep/strict 签名、Resources/app.asar 0 source map 与 packaged `/api/health` verifier 全部通过。2026-08-12 Safe Storage/signing 补丁全量 5193/0/1，Electron 40.10.6 build/package/deep/strict/0-map/health 与 GUI recovery single/budget/blocked 三场通过；telemetry review follow-up 定向 32/32、全量 5193/0/1；P3 follow-up 定向 9/9、全量 5194/0/1（5195 tests），Electron production build 通过。blocked 保持 quit-only。v0.66.1 official CI run 31615349470 证明证书已导入但 `CSC_IDENTITY_AUTO_DISCOVERY=false` 仍令 electron-builder 跳过身份选择；afterSign 按预期 fail-closed，未创建 Release。修正后 v0.66.2 run [`31616811316`](https://github.com/op7418/CodePilot/actions/runs/31616811316) 的 macOS Developer ID 双架构 package/final verifier、Windows、Linux x64/arm64 与 release job 全绿；[Release](https://github.com/op7418/CodePilot/releases/tag/v0.66.2) 为非 draft/非 prerelease且 12 assets uploaded。真实 active-turn/soak/cohort 仍是独立验收。
+- **下一步:** 用可控 provider/凭据跑 active-turn interruption、历史 route/文件树恢复；跑 fresh/history 15 分钟和长任务 60 分钟内存曲线；下一 stable 核验 utility fatal event 的脱敏/分组和 Graphite/utility crash cohort。条件允许时在受影响机器执行经批准的 profile/heap/network A/B。未获外部分发/机器 A/B 授权时继续只做本地/合成验证。
+
 ---
 
 ### P2 — 体验问题
@@ -313,11 +324,12 @@ GitHub milestone `v0.56.x Stability / Trust`（#1）+ P0/P1 label 体系已建�
 
 #### B-025 主日志 12G 暴涨与 Codex Runtime 闪退
 - **计划:** [log-bloat-codex-runtime-crash.md](log-bloat-codex-runtime-crash.md)
-- **状态:** 🔴 日志暴涨已确认；闪退高相关待 live 复现（2026-06-08 用户提供 12G `codepilot-main` 日志）
+- **状态:** 🟡 P0+P1 已落地并通过单测；真实 Codex approval/network live smoke 待跑（2026-08-10 状态校准）
 - **现象:** 用户另一台电脑 `codepilot-main` 日志达到约 12.5G；Codex Runtime 下客户端偶发闪退，最近一次疑似发生在突破沙盒权限、需要网络授权/搜索文件时。
-- **本地核实:** 用户日志尾部 50MB 中约 70,000 行里 69,253 行是 Codex app-server `codex_core::tasks` enter/exit tracing；`electron/main.ts` 明确没有 size-based rotation；`src/lib/codex/app-server-manager.ts` 默认 `RUST_LOG=info`；Electron 主进程把 server stdout/stderr 写入持久日志，并且 `serverErrors.push(msg)` 无界累积。
-- **影响:** 日志暴涨会吃磁盘；无界 `serverErrors` 会把同一批 tracing 噪声留在主进程内存里，是 Codex Runtime 闪退/卡死的高置信候选根因。当前日志没有 `panic` / OOM / uncaught 栈，仍需 live smoke 和 crash breadcrumb 定案。
-- **下一步:** Claude Code 优先修 P0 logging 上限：主日志 size rotation、`serverErrors` ring buffer、Codex tracing 默认降级/过滤；随后补 `render-process-gone` / `child-process-gone` / uncaught breadcrumb，并跑真实 Codex `require_escalated` / network approval smoke。
+- **当时本地核实:** 用户日志尾部 50MB 中约 70,000 行里 69,253 行是 Codex app-server `codex_core::tasks` enter/exit tracing；修复前 `electron/main.ts` 没有 size-based rotation，`src/lib/codex/app-server-manager.ts` 默认 `RUST_LOG=info`，且修复前 `serverErrors.push(msg)` 无界累积。
+- **历史影响判断:** 日志暴涨会吃磁盘；修复前无界 `serverErrors` 也会把 tracing 噪声留在主进程内存里，因此当时被列为闪退/卡死的高置信候选。原样本没有 `panic` / OOM / uncaught 栈，未能把闪退类型定案。
+- **已落地:** 主日志 size rotation、`serverErrors` 双上限 ring、Codex tracing 默认降级/过滤、`render-process-gone` / `child-process-gone` / uncaught crash breadcrumb 已实现并有单测。2026-08-10 新事故已拿到明确 Utility OOM，但该 child 的内存不来自旧 Main `serverErrors` 洪水，另由 B-030 跟踪。
+- **下一步:** 保留真实 Codex `require_escalated` / network approval smoke 验证债；不要把 B-030 的 Next child OOM重新归因到已经封口的 logging 链路。
 
 #### B-026 Kimi for Coding 首轮不会生成语义会话标题
 - **状态:** 🟢 已修复，真实 provider wire smoke 通过；待用户用新会话复验 UI 即时同步（2026-07-19）
@@ -340,13 +352,16 @@ GitHub milestone `v0.56.x Stability / Trust`（#1）+ P0/P1 label 体系已建�
 
 #### B-018 macOS 启动 / 新对话时弹 "找不到用于储存 'apple' 的钥匙串" 对话框
 - **Issue:** [#501](https://github.com/op7418/CodePilot/issues/501)
-- **状态:** 🟢 代码修复 + 定向回归完成；待受影响 Mac packaged smoke（2026-08-07）
+- **状态:** 🟡 第二分支 Shipped in v0.66.2；official-signed CI 与 Release 已通过，待旧 ad-hoc 安装首次升级及下一同 Team ID 版本不重复授权验收（2026-08-13）
 - **Signal:** v0.50.3 已有用户在启动/新对话时看到 `Cannot find keychain to store 'apple'`；2026-08-05 又收到会话生成阶段的真实截图，文本为“找不到用于储存 `kevinyoung` 的钥匙串”，按钮仅“取消/还原为默认”。用户名随报告者变化，说明它不是固定 service name。
 - **更正后的根因:** 旧诊断把弹窗归因于 Chromium 且建议 `password-store=basic`，现已被直接调用链证据推翻。当前 bundled Claude CLI 会在每个 CLI subprocess 启动时以 `process.env.USER || os.userInfo().username` 作为 `-a`，并通过 PATH 调用 `security find-generic-password ... -s 'Claude Code*'` 做两次 eager prefetch；截图中的 `kevinyoung` 正好是该 account 参数。旧报告发生于 CodePilot 引入 `safeStorage` 之前，也排除了 provider secret 是历史主因。v0.65+ 的 Electron `safeStorage` 现在构成第二条可能触发链，需一并前置门控。
 - **Fix:** 新增只读 `/usr/bin/security default-keychain -d user` 探测，只解析配置路径并检查文件存在，不读取/解锁/创建/修复任何 credential item。确认 default keychain 缺失、未配置或 probe 失败时：① Electron Main 在进入 `safeStorage` 前跳过 provider DEK 初始化；② packaged Next child 收到脱敏状态码；③ 每个 Claude subprocess 的 PATH 前置 packaged `security` shim。shim 只对 `Claude Code*` service 的 find/add/delete 和无参数 `show-keychain-info` 非交互返回失败，让 Claude 使用已有环境变量/文件 fallback；其余命令以固定 `/usr/bin/security "$@"` 原样转发。健康 keychain 不改 PATH、不改变 OAuth/Provider 行为。复核所有 SDK `query()` 后又关闭一条“偶发”漏口：`CONTEXT_TOO_LONG` 压缩重试原先直接复制 `process.env`，现复用同一 request 已构建的 guarded/provider-isolated env。
 - **明确不采用:** 不设置 `password-store=basic`——Chromium 该 switch 的 `basic` backend 是 Linux 路径，不能作为 macOS 修复；不设置 `CLAUDE_CODE_SIMPLE` / `--bare`——它会同时关闭 hooks、插件同步、项目指令发现等正常能力。
 - **Verify:** `macos-keychain-guard.test.ts` 覆盖 available/missing/unconfigured/timeout、非 macOS no-op、shim 精确拒绝与 argv 固定转发、bundled Claude CLI 仍经 PATH lookup；`provider-secret-electron-contract.test.ts` 锁定 unavailable 分支在 safeStorage 之前；`electron-packaging-hygiene.test.ts` 锁定资源进包；源码钉禁止 reactive retry 重新使用 raw `process.env`。定向回归 58/58、Tier 1 全量 5131 pass / 0 fail / 1 skip，Electron Main one-shot bundle、targeted ESLint、hook/docs-drift lint 均通过。本机真实 default-keychain probe 为 `available`。维护者未破坏/改写本机钥匙串来制造复现；发布前仍需在报告者或隔离 macOS 账户上做 packaged smoke。
 - **可观测性:** Main log 只记录 `default_keychain_*` 原因码；Provider Doctor 增加 `auth.macos-default-keychain-unavailable` warning，不记录用户名、keychain 路径或凭据。系统 modal 本身仍不进入 Sentry。
+- **2026-08-12 新 Signal / 根因分支:** 第二台 default keychain 健康的 Mac 出现“使用 `codepilot Safe Storage` 中的机密信息”；本机 recovery smoke 也阻塞在 `SecItemCopyMatching`。复核发现 stable 与两条 preview workflow 都关闭 identity auto discovery 且没有证书 secrets，`after-sign.js` 又静默回退 ad-hoc，因此正式包和测试包都会随每次构建改变 designated requirement（无 Team ID、绑定 CDHash），访问旧 Safe Storage ACL 时触发系统授权。修复改为三条 macOS workflow 必须 Developer ID + exact Team ID，afterSign 和最终 bundle 双层 fail-closed；ad-hoc 仅允许显式本地隔离包。详见 `macos-safe-storage-signing-remediation-2026-08-12.md`。已由旧 ad-hoc 包创建条目的机器首次切换稳定签名仍可能需要一次授权，不承诺无迁移地恢复旧 ACL。
+- **2026-08-13 CI 校准:** v0.66.1 stable run 31615349470 没有绕过门禁，但证书 step 同时关闭 auto discovery，导致证书导入后没有 identity selector，electron-builder 跳过签名并由 afterSign 阻断。修复只从三个含 `CSC_LINK` 的签名 step 移除该开关；无证书 build/local ad-hoc 路径继续禁用 discovery。失败 tag 保留且不重建，v0.66.2 作为修正版重跑。
+- **2026-08-13 发布证据:** v0.66.2 run [`31616811316`](https://github.com/op7418/CodePilot/actions/runs/31616811316) 的 macOS arm64+x64 Developer ID package、exact Team ID/deep-strict、native ABI、packaged server 与 checksums 全部通过；[Release](https://github.com/op7418/CodePilot/releases/tag/v0.66.2) 已发布 12 个 uploaded assets。发布签名链已闭合，旧 ACL 迁移体验仍按真实受影响机器观察，不以 CI 代替。
 
 ---
 

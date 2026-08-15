@@ -29,6 +29,8 @@ import {
   CODEX_AUTO_REVIEW_MIN_VERSION,
   selectBestCodexCandidate,
   isFatalCodexConfigStderr,
+  isCodexModelRefreshTimeoutStderr,
+  appendCodexHealthSignal,
   resetCodexBinaryCacheForTests,
   buildCodexLaunch,
   buildCodexAppServerArgs,
@@ -507,6 +509,25 @@ describe('isFatalCodexConfigStderr — fatal-stderr detection (P0.2)', () => {
   it('DOES match `unknown variant` when it co-occurs with config/deserialize context', () => {
     assert.equal(isFatalCodexConfigStderr('config: unknown variant `xhigh` in `model_reasoning_effort`'), true);
     assert.equal(isFatalCodexConfigStderr('failed to deserialize: unknown variant `xhigh`'), true);
+  });
+});
+
+describe('isCodexModelRefreshTimeoutStderr — wedged refresh signal', () => {
+  it('matches only the complete Codex internal refresh-timeout signature', () => {
+    assert.equal(isCodexModelRefreshTimeoutStderr(
+      'WARN codex_models_manager::manager: failed to refresh available models: timeout waiting for child process to exit',
+    ), true);
+    assert.equal(isCodexModelRefreshTimeoutStderr('request timeout waiting for child process to exit'), false);
+    assert.equal(isCodexModelRefreshTimeoutStderr('failed to refresh available models'), false);
+  });
+});
+
+describe('appendCodexHealthSignal — bounded unhealthy threshold', () => {
+  it('marks the third signal inside ten minutes unhealthy and expires older signals', () => {
+    assert.equal(appendCodexHealthSignal([0, 1], 2).unhealthy, true);
+    const expired = appendCodexHealthSignal([0, 1], 10 * 60_000 + 2);
+    assert.equal(expired.unhealthy, false);
+    assert.deepEqual(expired.signalTimes, [10 * 60_000 + 2]);
   });
 });
 

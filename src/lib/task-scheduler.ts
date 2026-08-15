@@ -46,6 +46,7 @@ export function ensureSchedulerRunning(): void {
   // creates timers in a short-lived build worker. Runtime startup invokes this
   // again with NEXT_PHASE unset, so suppress only the documented build phase.
   if (process.env.NEXT_PHASE === 'phase-production-build') return;
+  if (process.env.CODEPILOT_RECOVERY_SAFE_MODE === '1') return;
   if ((globalThis as Record<string, unknown>)[GLOBAL_KEY]) return;
   (globalThis as Record<string, unknown>)[GLOBAL_KEY] = true;
 

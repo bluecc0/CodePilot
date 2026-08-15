@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   invalidateCodexModelCatalogWarmup,
+  isCodexRecoverySafeModeVisible,
   resetCodexModelCatalogWarmupForTests,
   warmCodexModelCatalog,
 } from '@/lib/codex/model-catalog-warmup';
@@ -75,6 +76,20 @@ describe('Codex model catalog chat warm-up', () => {
     await warmCodexModelCatalog(fakeFetch, () => { readyEvents += 1; });
     assert.equal(fetchCalls, 2, 'an empty first attempt must not permanently poison the renderer');
     assert.equal(readyEvents, 1);
+  });
+
+  it('surfaces Main-owned recovery safe mode without claiming an empty account', async () => {
+    let recoveryEvents = 0;
+    await warmCodexModelCatalog(
+      async () => ({
+        ok: true,
+        json: async () => ({ group: null, recoverySafeMode: true }),
+      }),
+      () => assert.fail('safe mode must not emit catalog ready'),
+      (active) => { if (active) recoveryEvents += 1; },
+    );
+    assert.equal(isCodexRecoverySafeModeVisible(), true);
+    assert.equal(recoveryEvents, 1);
   });
 
   it('keeps the unified feed cache-only and wires the narrow ready event into the hook', () => {

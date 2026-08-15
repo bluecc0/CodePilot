@@ -22,12 +22,23 @@ const ALLOWED_EXTRAS = new Set([
   'callScene',
   'childRole',
   'exitCode',
+  'hostAvailableKb',
+  'hostFreeKb',
+  'hostSwapFreeKb',
+  'hostSwapTotalKb',
+  'hostTotalKb',
   'lifecycleReason',
   'originalLength',
   'retryExhausted',
   'signal',
   'timeoutStage',
   'truncated',
+  'utilityArrayBuffersBytes',
+  'utilityExternalBytes',
+  'utilityHeapLimitBytes',
+  'utilityHeapTotalBytes',
+  'utilityHeapUsedBytes',
+  'utilityRssBytes',
 ]);
 
 const SECRET_PATTERNS: RegExp[] = [

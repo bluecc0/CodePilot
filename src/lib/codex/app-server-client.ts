@@ -69,11 +69,30 @@ export interface CodexClientOptions {
   maxOverloadRetries?: number;
 }
 
+export interface CodexRequestOptions {
+  /** Abort only this RPC and remove its pending entry immediately. */
+  signal?: AbortSignal;
+  /** Per-call timeout override. Defaults to the client-level timeout. */
+  timeoutMs?: number;
+}
+
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: CodexRpcError | Error) => void;
   timer: ReturnType<typeof setTimeout> | null;
   method: string;
+  startedAt: number;
+  signal?: AbortSignal;
+  abortHandler?: () => void;
+}
+
+export class CodexRequestAbortedError extends Error {
+  readonly code = 'CODEX_RPC_ABORTED';
+
+  constructor(method: string) {
+    super(`Codex RPC aborted: ${method}`);
+    this.name = 'AbortError';
+  }
 }
 
 export class CodexRpcError extends Error {
@@ -171,6 +190,9 @@ export class CodexAppServerClient {
     this.closeReason = reason ?? new Error('Codex app-server connection closed');
     for (const [id, pending] of this.pending) {
       if (pending.timer) clearTimeout(pending.timer);
+      if (pending.signal && pending.abortHandler) {
+        pending.signal.removeEventListener('abort', pending.abortHandler);
+      }
       pending.reject(this.closeReason);
       this.pending.delete(id);
     }
@@ -204,13 +226,17 @@ export class CodexAppServerClient {
   }
 
   /** Send a request; resolves with the typed result. */
-  async request<TResult>(method: string, params?: unknown): Promise<TResult> {
+  async request<TResult>(
+    method: string,
+    params?: unknown,
+    options: CodexRequestOptions = {},
+  ): Promise<TResult> {
     let attempt = 0;
     // Overload retry loop. Each attempt uses a fresh id so a late
     // overload response from a previous attempt can't resolve the new one.
     while (true) {
       try {
-        return await this.requestOnce<TResult>(method, params);
+        return await this.requestOnce<TResult>(method, params, options);
       } catch (err) {
         if (err instanceof CodexRpcError && err.retryable && attempt < this.maxOverloadRetries) {
           attempt++;
@@ -224,27 +250,61 @@ export class CodexAppServerClient {
     }
   }
 
-  private requestOnce<TResult>(method: string, params?: unknown): Promise<TResult> {
+  private requestOnce<TResult>(
+    method: string,
+    params?: unknown,
+    options: CodexRequestOptions = {},
+  ): Promise<TResult> {
     // attach() may discover an already-dead transport and set `closed`.
     if (!this.unsubscribe) this.attach();
     if (this.closed) {
       return Promise.reject(this.closeReason ?? new Error('Codex app-server connection closed'));
     }
+    if (options.signal?.aborted) {
+      return Promise.reject(new CodexRequestAbortedError(method));
+    }
     return new Promise<TResult>((resolve, reject) => {
       const id = this.nextId++;
+      const timeoutMs = options.timeoutMs ?? this.timeoutMs;
+      const cleanup = () => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        if (pending.timer) clearTimeout(pending.timer);
+        if (pending.signal && pending.abortHandler) {
+          pending.signal.removeEventListener('abort', pending.abortHandler);
+        }
+        this.pending.delete(id);
+      };
+      const abortHandler = options.signal
+        ? () => {
+            if (!this.pending.has(id)) return;
+            cleanup();
+            reject(new CodexRequestAbortedError(method));
+          }
+        : undefined;
       const timer =
-        this.timeoutMs > 0
+        timeoutMs > 0
           ? setTimeout(() => {
-              this.pending.delete(id);
-              reject(new Error(`Codex RPC timeout: ${method} (>${this.timeoutMs}ms)`));
-            }, this.timeoutMs)
+              cleanup();
+              reject(new Error(`Codex RPC timeout: ${method} (>${timeoutMs}ms)`));
+            }, timeoutMs)
           : null;
       this.pending.set(id, {
         resolve: (v) => resolve(v as TResult),
         reject,
         timer,
         method,
+        startedAt: Date.now(),
+        signal: options.signal,
+        abortHandler,
       });
+      options.signal?.addEventListener('abort', abortHandler!, { once: true });
+      // Close the check→listener race: AbortSignal does not replay an abort
+      // event to listeners attached after it has already fired.
+      if (options.signal?.aborted) {
+        abortHandler?.();
+        return;
+      }
       const message: JsonRpcRequest = {
         jsonrpc: '2.0',
         id,
@@ -252,8 +312,7 @@ export class CodexAppServerClient {
         ...(params !== undefined ? { params } : {}),
       };
       void Promise.resolve(this.transport.send(JSON.stringify(message))).catch((err) => {
-        this.pending.delete(id);
-        if (timer) clearTimeout(timer);
+        cleanup();
         reject(err instanceof Error ? err : new Error(String(err)));
       });
     });
@@ -344,6 +403,9 @@ export class CodexAppServerClient {
     this.closed = true;
     for (const [id, pending] of this.pending) {
       if (pending.timer) clearTimeout(pending.timer);
+      if (pending.signal && pending.abortHandler) {
+        pending.signal.removeEventListener('abort', pending.abortHandler);
+      }
       pending.reject(new Error(`Codex RPC aborted: ${pending.method} (client disposed)`));
       this.pending.delete(id);
     }
@@ -367,7 +429,7 @@ export class CodexAppServerClient {
 
     // Response = has `id` + (`result` or `error`).
     if ('id' in parsed && parsed.id !== null && parsed.id !== undefined && ('result' in parsed || 'error' in parsed)) {
-      this.routeResponse(parsed as JsonRpcResponse);
+      this.routeResponse(parsed as JsonRpcResponse, Buffer.byteLength(trimmed, 'utf8'));
       return;
     }
     // Server-originated request = has `id` + `method` (no result/error).
@@ -442,7 +504,7 @@ export class CodexAppServerClient {
     await this.transport.send(JSON.stringify({ jsonrpc: '2.0', id, ...body }));
   }
 
-  private routeResponse(message: JsonRpcResponse): void {
+  private routeResponse(message: JsonRpcResponse, responseBytes: number): void {
     const idKey = message.id as number | string;
     const pending = this.pending.get(idKey);
     if (!pending) {
@@ -452,6 +514,16 @@ export class CodexAppServerClient {
     }
     this.pending.delete(idKey);
     if (pending.timer) clearTimeout(pending.timer);
+    if (pending.signal && pending.abortHandler) {
+      pending.signal.removeEventListener('abort', pending.abortHandler);
+    }
+    if (pending.method === 'model/list') {
+      console.info('[codex.models] response', {
+        durationMs: Date.now() - pending.startedAt,
+        responseBytes,
+        outcome: 'error' in message ? 'rpc_error' : 'success',
+      });
+    }
     if ('error' in message) {
       pending.reject(
         new CodexRpcError({

@@ -13,13 +13,15 @@
 
 import type { ProviderModelGroup } from '@/types';
 import type { CodexModel } from './types';
-import { getCodexAppServer } from './app-server-manager';
+import { getCodexAppServer, markCodexAppServerUnhealthy } from './app-server-manager';
 import { toGenericEffortLevels } from './effort';
 
 type ProviderModelOption = ProviderModelGroup['models'][number];
 
 const CACHE_TTL_MS = 30_000;
 const DEFAULT_FETCH_TIMEOUT_MS = 2500;
+const FAILURE_COOLDOWN_MS = 5_000;
+const UNHEALTHY_FAILURE_THRESHOLD = 3;
 
 interface CacheEntry {
   fetchedAt: number;
@@ -27,6 +29,10 @@ interface CacheEntry {
 }
 
 let cache: CacheEntry | null = null;
+let cacheGeneration = 0;
+let activeFetch: { generation: number; promise: Promise<readonly CodexModel[]> } | null = null;
+let failureCooldownUntil = 0;
+let consecutiveFailures = 0;
 
 /**
  * P0.3 (2026-06-01) — Codex model discovery must never block the global
@@ -50,16 +56,30 @@ export interface CodexModelFetchOptions {
 
 /** Minimal shape of the cached app-server this module needs — a DI seam so
  *  tests can drive cacheOnly / timeout behavior without a real subprocess. */
-type CodexAppServerLike = { client: { request: <T>(method: string, params?: unknown) => Promise<T> } };
+type CodexAppServerLike = {
+  client: {
+    request: <T>(
+      method: string,
+      params?: unknown,
+      options?: { signal?: AbortSignal; timeoutMs?: number },
+    ) => Promise<T>;
+  };
+};
 type GetCodexAppServerFn = () => Promise<CodexAppServerLike>;
 
-/** Race a promise against a timeout; clears the timer on settle (no leak). */
-function withTimeout<T>(ms: number, p: Promise<T>): Promise<T> {
+/** Race a promise against a timeout and abort the underlying RPC at the same
+ * deadline. The injected fake seam may ignore AbortSignal, so the outer race
+ * remains the caller-facing hard ceiling. */
+function withTimeout<T>(ms: number, start: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Codex model/list timed out after ${ms}ms`)), ms);
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`Codex model/list timed out after ${ms}ms`));
+    }, ms);
   });
-  return Promise.race([p, timeout]).finally(() => {
+  return Promise.race([start(controller.signal), timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
 }
@@ -129,9 +149,14 @@ function normalizeSupportedEfforts(raw: unknown): string[] {
   return out;
 }
 
-async function fetchModelsFromAppServer(getAppServer: GetCodexAppServerFn): Promise<CodexModel[]> {
+async function fetchModelsFromAppServer(
+  getAppServer: GetCodexAppServerFn,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<CodexModel[]> {
+  const startedAt = Date.now();
   const { client } = await getAppServer();
-  const result = await client.request<{
+  let result: {
     data: Array<{
       id: string;
       model: string;
@@ -146,7 +171,28 @@ async function fetchModelsFromAppServer(getAppServer: GetCodexAppServerFn): Prom
       serviceTiers?: Array<{ id?: string; name?: string }>;
     }>;
     nextCursor: string | null;
-  }>('model/list', { includeHidden: false });
+  };
+  try {
+    result = await client.request<typeof result>(
+      'model/list',
+      { includeHidden: false },
+      { signal, timeoutMs },
+    );
+  } catch (error) {
+    console.warn('[codex.models] request failed', {
+      durationMs: Date.now() - startedAt,
+      reason: signal.aborted
+        ? 'deadline_aborted'
+        : error instanceof Error && error.name === 'AbortError'
+          ? 'rpc_aborted'
+          : 'rpc_failed',
+    });
+    throw error;
+  }
+  console.info('[codex.models] catalog parsed', {
+    durationMs: Date.now() - startedAt,
+    modelCount: Array.isArray(result?.data) ? result.data.length : 0,
+  });
 
   return (result?.data ?? [])
     .filter((m) => !m.hidden)
@@ -192,14 +238,49 @@ export async function listCodexModels(
   if (!force && cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
     return cache.models;
   }
-  const models = await withTimeout(timeoutMs, fetchModelsFromAppServer(getAppServer));
-  cache = { fetchedAt: Date.now(), models };
-  return models;
+  const generation = cacheGeneration;
+  if (activeFetch?.generation === generation) return activeFetch.promise;
+  if (!force && Date.now() < failureCooldownUntil) {
+    if (cache) return cache.models;
+    throw new Error('Codex model discovery is cooling down after repeated failure');
+  }
+  if (force) failureCooldownUntil = 0;
+
+  const fetchPromise = withTimeout(
+    timeoutMs,
+    (signal) => fetchModelsFromAppServer(getAppServer, signal, timeoutMs),
+  ).then((models) => {
+    if (cacheGeneration === generation) {
+      cache = { fetchedAt: Date.now(), models };
+      consecutiveFailures = 0;
+      failureCooldownUntil = 0;
+    }
+    return models;
+  }).catch((error) => {
+    if (cacheGeneration === generation) {
+      consecutiveFailures += 1;
+      failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS;
+      if (
+        consecutiveFailures >= UNHEALTHY_FAILURE_THRESHOLD
+        && getAppServer === getCodexAppServer
+      ) {
+        markCodexAppServerUnhealthy('model_list_repeated_failure');
+      }
+    }
+    throw error;
+  }).finally(() => {
+    if (activeFetch?.promise === fetchPromise) activeFetch = null;
+  });
+  activeFetch = { generation, promise: fetchPromise };
+  return fetchPromise;
 }
 
 /** Drop the in-memory model cache. Call on account change / logout. */
 export function invalidateCodexModelsCache(): void {
   cache = null;
+  cacheGeneration += 1;
+  failureCooldownUntil = 0;
+  consecutiveFailures = 0;
 }
 
 /**

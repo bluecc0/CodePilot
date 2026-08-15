@@ -282,7 +282,10 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
     resolvedModel,
     providerWasFilteredOut,
     providerGroups,
+    codexRecoverySafeMode,
   } = useProviderModels(currentProviderId, currentModel, sessionRuntimeParam);
+  const codexRuntimeRecoveryBlocked = codexRecoverySafeMode
+    && sessionRuntimeParam === 'codex_runtime';
 
   // #632 item 1 — does the active session provider report a TRUSTWORTHY context
   // window? `false` only for a third-party Anthropic-compat proxy (e.g. GLM),
@@ -1163,6 +1166,10 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
         console.warn('[ChatView] startStream suppressed: session provider runtime-incompatible — user must pick another in the composer');
         return false;
       }
+      if (codexRuntimeRecoveryBlocked) {
+        console.warn('[ChatView] startStream suppressed: Codex Runtime disabled by recovery safe mode');
+        return false;
+      }
       const notices = pendingImageNoticesRef.current.length > 0
         ? [...pendingImageNoticesRef.current]
         : undefined;
@@ -1210,7 +1217,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
       });
       return true;
     },
-    [sessionId, mode, currentModel, currentProviderId, assistantId, selectedEffort, context1m, buildThinkingConfig, handleModeChange, noCompatibleProvider, providerFetchState, resolvedProviderId, resolvedModel, sessionProviderRuntimeIncompatible]
+    [sessionId, mode, currentModel, currentProviderId, assistantId, selectedEffort, context1m, buildThinkingConfig, handleModeChange, noCompatibleProvider, providerFetchState, resolvedProviderId, resolvedModel, sessionProviderRuntimeIncompatible, codexRuntimeRecoveryBlocked]
   );
 
   const sendMessage = useCallback(
@@ -1228,6 +1235,10 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
       if (noCompatibleProvider) {
         console.warn('[ChatView] sendMessage suppressed: no provider compatible with active runtime');
         return false; // not delivered → preserve composer (#615)
+      }
+      if (codexRuntimeRecoveryBlocked) {
+        console.warn('[ChatView] sendMessage suppressed: Codex Runtime disabled by recovery safe mode');
+        return false;
       }
       // Mirror doStartStream's Guard 4 *before* we push the optimistic
       // bubble. MessageInput's disabled prop already blocks the typical
@@ -1291,7 +1302,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
       cappedSetMessages((prev) => [...prev, userMessage]);
       doStartStream(content, files, systemPromptAppend, displayOverride, mentions, selectedSkills);
     },
-    [sessionId, isStreaming, doStartStream, cappedSetMessages, noCompatibleProvider, providerFetchState, sessionProviderRuntimeIncompatible]
+    [sessionId, isStreaming, doStartStream, cappedSetMessages, noCompatibleProvider, providerFetchState, sessionProviderRuntimeIncompatible, codexRuntimeRecoveryBlocked]
   );
 
   sendMessageRef.current = sendMessage;
@@ -1308,6 +1319,10 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
       if (noCompatibleProvider) {
         console.warn('[ChatView] dequeue suppressed: no provider compatible with active runtime');
         setMessageQueue([]);
+        return;
+      }
+      if (codexRuntimeRecoveryBlocked) {
+        console.warn('[ChatView] dequeue held: Codex Runtime disabled by recovery safe mode');
         return;
       }
       // Mirror sendMessage's runtime-incompatible guard. Without this
@@ -1357,7 +1372,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
     if (isStreaming) {
       dequeuingRef.current = false;
     }
-  }, [isStreaming, messageQueue, doStartStream, cappedSetMessages, sessionId, noCompatibleProvider, providerFetchState, sessionProviderRuntimeIncompatible]);
+  }, [isStreaming, messageQueue, doStartStream, cappedSetMessages, sessionId, noCompatibleProvider, providerFetchState, sessionProviderRuntimeIncompatible, codexRuntimeRecoveryBlocked]);
 
   // Expose widget drill-down bridge: widgets can call window.__widgetSendMessage(text)
   // to trigger follow-up questions (e.g. clicking a node to get deeper explanation)
@@ -1480,6 +1495,14 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
           </Button>
         </div>
       )}
+      {codexRuntimeRecoveryBlocked && (
+        <div
+          className="border-b border-status-warning-border bg-status-warning-muted px-4 py-2 text-xs text-status-warning-foreground"
+          role="status"
+        >
+          {t('chat.codexRecoverySafeMode' as TranslationKey)}
+        </div>
+      )}
       {isNewChat ? (
         // Centered hero — welcome row + composer as one vertically
         // centered max-w-3xl block. Skips MessageList and all the
@@ -1498,6 +1521,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
                 noCompatibleProvider
                 || providerFetchState === 'idle'
                 || sessionProviderRuntimeIncompatible
+                || codexRuntimeRecoveryBlocked
               }
               isStreaming={isStreaming}
               sessionId={sessionId}
@@ -1777,6 +1801,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
           noCompatibleProvider
           || providerFetchState === 'idle'
           || sessionProviderRuntimeIncompatible
+          || codexRuntimeRecoveryBlocked
         }
         isStreaming={isStreaming}
         sessionId={sessionId}

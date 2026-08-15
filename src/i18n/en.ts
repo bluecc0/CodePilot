@@ -140,6 +140,7 @@ const en = {
   // continue. The picker below already only lists real providers, so
   // picking one and sending again will route through the new choice.
   'chat.invalidSessionProvider.message': 'This session\'s saved provider "{providerId}" was deleted and the message could not be sent. Pick another provider in the composer below, or return to Settings to reconnect it.',
+  'chat.codexRecoverySafeMode': 'CodePilot recovered its local service in safe mode. Codex Runtime and automatic background tasks are paused; restart the app to return to normal mode.',
 
   // ── Settings: General ───────────────────────────────────────
   'settings.title': 'Settings',

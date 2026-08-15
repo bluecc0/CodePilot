@@ -14,6 +14,7 @@
  */
 
 export const CODEX_MODEL_CATALOG_READY_EVENT = 'codepilot:codex-model-catalog-ready';
+export const CODEX_RECOVERY_SAFE_MODE_EVENT = 'codepilot:codex-recovery-safe-mode';
 
 type FetchLike = (
   input: string,
@@ -21,14 +22,25 @@ type FetchLike = (
 ) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
 
 type EmitReady = () => void;
+type EmitRecoverySafeMode = (active: boolean) => void;
 
 let activeWarmup: Promise<void> | null = null;
 let catalogReady = false;
 let catalogGeneration = 0;
+let recoverySafeMode = false;
 
 function defaultEmitReady(): void {
   if (typeof window === 'undefined') return;
   window.dispatchEvent(new Event(CODEX_MODEL_CATALOG_READY_EVENT));
+}
+
+function defaultEmitRecoverySafeMode(active: boolean): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(CODEX_RECOVERY_SAFE_MODE_EVENT, { detail: active }));
+}
+
+export function isCodexRecoverySafeModeVisible(): boolean {
+  return recoverySafeMode;
 }
 
 /**
@@ -39,6 +51,7 @@ function defaultEmitReady(): void {
 export function warmCodexModelCatalog(
   fetchImpl: FetchLike = fetch,
   emitReady: EmitReady = defaultEmitReady,
+  emitRecoverySafeMode: EmitRecoverySafeMode = defaultEmitRecoverySafeMode,
 ): Promise<void> {
   if (catalogReady) return Promise.resolve();
   if (activeWarmup) return activeWarmup;
@@ -49,7 +62,13 @@ export function warmCodexModelCatalog(
       if (!response.ok) return;
       const body = await response.json() as {
         group?: { models?: unknown[] } | null;
+        recoverySafeMode?: boolean;
       } | null;
+      if (generation === catalogGeneration && body?.recoverySafeMode === true) {
+        recoverySafeMode = true;
+        emitRecoverySafeMode(true);
+        return;
+      }
       if (
         generation === catalogGeneration
         && body?.group
@@ -84,4 +103,7 @@ export function invalidateCodexModelCatalogWarmup(): void {
 }
 
 /** Test alias documenting deterministic state reset intent. */
-export const resetCodexModelCatalogWarmupForTests = invalidateCodexModelCatalogWarmup;
+export function resetCodexModelCatalogWarmupForTests(): void {
+  invalidateCodexModelCatalogWarmup();
+  recoverySafeMode = false;
+}

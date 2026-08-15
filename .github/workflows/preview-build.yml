@@ -228,10 +228,17 @@ jobs:
         run: npm version "${{ inputs.preview_version }}" --no-git-tag-version --allow-same-version
       - name: Build + package (arm64 only, no publish)
         timeout-minutes: 25
+        env:
+          CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          CODEPILOT_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CODEPILOT_REQUIRE_DEVELOPER_ID: "1"
         run: |
           npm run electron:build
           npx electron-builder --mac --arm64 --config electron-builder.yml --publish never
       - name: Verify packaged version == input (filename + Info.plist)
+        env:
+          CODEPILOT_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           DMG=$(find release -name "CodePilot-*-arm64.dmg" | head -1)
@@ -239,6 +246,7 @@ jobs:
           [ -n "$DMG" ] || { echo "::error::no arm64 DMG produced"; exit 1; }
           case "$DMG" in *"${{ inputs.preview_version }}"*) ;; *) echo "::error::DMG name lacks ${{ inputs.preview_version }}"; exit 1 ;; esac
           APP=$(find release -maxdepth 4 -name "CodePilot.app" -type d | head -1)
+          node scripts/verify-macos-developer-id.mjs release 1
           PLIST_VER=$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")
           echo "Info.plist CFBundleShortVersionString=$PLIST_VER" | tee -a build-meta-macos-arm64.txt
           [ "$PLIST_VER" = "${{ inputs.preview_version }}" ] || { echo "::error::Info.plist $PLIST_VER != ${{ inputs.preview_version }}"; exit 1; }

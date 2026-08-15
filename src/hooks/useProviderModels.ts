@@ -18,6 +18,8 @@ import { findModelOption } from '@/lib/model-option-match';
 import { ENV_CLAUDE_CODE_MODELS } from '@/lib/provider-catalog';
 import {
   CODEX_MODEL_CATALOG_READY_EVENT,
+  CODEX_RECOVERY_SAFE_MODE_EVENT,
+  isCodexRecoverySafeModeVisible,
   warmCodexModelCatalog,
 } from '@/lib/codex/model-catalog-warmup';
 
@@ -127,6 +129,8 @@ export interface UseProviderModelsReturn {
    * and on API failure we don't want to silently rewrite saved state.
    */
   providerWasFilteredOut: boolean;
+  /** Main-owned recovery mode disables all Codex app-server starts. */
+  codexRecoverySafeMode: boolean;
 }
 
 /**
@@ -162,6 +166,9 @@ export function useProviderModels(
   // briefly disable the composer (and let auto-trigger / retry paths
   // swallow sends) before the runtime-filtered feed even arrives.
   const [fetchState, setFetchState] = useState<'idle' | 'loaded' | 'failed'>('idle');
+  const [codexRecoverySafeMode, setCodexRecoverySafeMode] = useState(
+    isCodexRecoverySafeModeVisible,
+  );
   // Tracks the in-flight provider/options fetch so a later refetch
   // (provider-changed event, runtime switch) can abort the previous
   // pair before starting its own. Without this, a slow earlier
@@ -256,11 +263,16 @@ export function useProviderModels(
     fetchAll();
     const providerChangedHandler = () => fetchAll();
     const codexCatalogReadyHandler = () => fetchAll();
+    const codexRecoveryHandler = (event: Event) => {
+      setCodexRecoverySafeMode((event as CustomEvent<boolean>).detail === true);
+    };
     window.addEventListener('provider-changed', providerChangedHandler);
     window.addEventListener(CODEX_MODEL_CATALOG_READY_EVENT, codexCatalogReadyHandler);
+    window.addEventListener(CODEX_RECOVERY_SAFE_MODE_EVENT, codexRecoveryHandler);
     return () => {
       window.removeEventListener('provider-changed', providerChangedHandler);
       window.removeEventListener(CODEX_MODEL_CATALOG_READY_EVENT, codexCatalogReadyHandler);
+      window.removeEventListener(CODEX_RECOVERY_SAFE_MODE_EVENT, codexRecoveryHandler);
       // Abort any in-flight request when the consumer unmounts so it
       // can't try to setState on a torn-down component.
       fetchControllerRef.current?.abort();
@@ -438,5 +450,6 @@ export function useProviderModels(
     resolvedProviderId,
     resolvedModel,
     providerWasFilteredOut,
+    codexRecoverySafeMode,
   };
 }

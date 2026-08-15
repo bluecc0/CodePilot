@@ -13,6 +13,7 @@ import {
 } from '@/lib/runtime-compat';
 import { isChatRuntimeParam, resolveChatRuntimeParam, type ChatRuntime } from '@/lib/chat-runtime';
 import { buildCodexProviderModelGroup } from '@/lib/codex/models';
+import { isServerRecoverySafeMode } from '@/lib/server-recovery-safe-mode';
 
 // Default Claude model options (for the built-in 'env' provider).
 // Capability metadata ensures `xhigh` appears in the effort dropdown even
@@ -529,7 +530,11 @@ export async function GET(request: NextRequest) {
     //     Codex entirely — saves an unnecessary RPC.
     if (runtimeFilter === 'codex_runtime') {
       try {
-        const codexGroup = await buildCodexProviderModelGroup({ timeoutMs: 2500 });
+        const codexGroup = await buildCodexProviderModelGroup(
+          isServerRecoverySafeMode()
+            ? { cacheOnly: true }
+            : { timeoutMs: 2500 },
+        );
         if (codexGroup) groups.push(codexGroup);
       } catch {
         /* degraded: Codex unreachable / timed out — no Codex group. */

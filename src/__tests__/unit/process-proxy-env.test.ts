@@ -127,7 +127,7 @@ describe('process proxy environment — loopback boundary', () => {
     assert.match(electronMain, /import \{ buildProxySafeEnvironment \} from '\.\.\/src\/lib\/process-proxy-env'/);
     assert.match(
       electronMain,
-      /function startServer\(port: number\)[\s\S]*?buildProxySafeEnvironment\(\{[\s\S]*?fallbackProxyEnv: resolvedProxyEnv/,
+      /function startServer\(port: number, recoverySafeMode = false\)[\s\S]*?buildProxySafeEnvironment\(\{[\s\S]*?fallbackProxyEnv: resolvedProxyEnv/,
     );
     assert.doesNotMatch(
       electronMain,

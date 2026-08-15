@@ -137,6 +137,7 @@ const zh: Record<TranslationKey, string> = {
   // 「保存的服务商不在了，请在下方挑一个新的」，picker 已经只显示
   // 真实存在的 provider，所以挑完再发就会走新 provider。
   'chat.invalidSessionProvider.message': '本会话保存的服务商「{providerId}」已经被删除，无法继续发送。请在下方挑选其它服务商或返回设置重新连接。',
+  'chat.codexRecoverySafeMode': 'CodePilot 已用安全模式恢复本地服务。Codex Runtime 和自动后台任务已暂停；重启应用后可恢复正常模式。',
 
   // ── Settings: General ───────────────────────────────────────
   'settings.title': '设置',

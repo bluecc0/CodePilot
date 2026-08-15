@@ -8,6 +8,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     chrome: process.versions.chrome,
     platform: process.platform,
   },
+  serverRecovery: {
+    copyDiagnostics: () => ipcRenderer.invoke('server-recovery:copy-diagnostics') as Promise<boolean>,
+    retry: () => ipcRenderer.invoke('server-recovery:retry') as Promise<boolean>,
+    restartApp: () => ipcRenderer.invoke('server-recovery:restart-app') as Promise<boolean>,
+    quitApp: () => ipcRenderer.invoke('server-recovery:quit-app') as Promise<boolean>,
+  },
   // Resolve a dropped/selected File's real filesystem path. Electron 32+ removed
   // the renderer-side `File.path`, so consumers must ask via webUtils.
   fs: {

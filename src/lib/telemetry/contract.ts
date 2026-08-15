@@ -192,22 +192,34 @@ export function filterTelemetryIntegrations<T extends NamedIntegration>(
 
 /**
  * Keep exactly one Electron main-process session producer, but send its
- * initial session immediately. CodePilot is tray-resident, so relying on a
- * clean app exit can leave a whole release without timely health data.
+ * initial session immediately. Also keep exactly one ChildProcess integration
+ * whose automatic events are disabled: its process-exit breadcrumbs remain
+ * useful, while utility failures are owned by the normalized generation
+ * one-shot boundary instead of being emitted a second time as SDK messages.
  */
 export function configureElectronMainIntegrations<T extends NamedIntegration>(
   integrations: T[],
   eagerMainProcessSession: T,
+  breadcrumbOnlyChildProcess: T,
 ): T[] {
   const filtered = filterTelemetryIntegrations('electron_main', integrations);
   let replacedSession = false;
+  let replacedChildProcess = false;
   const configured = filtered.map((integration) => {
-    if (integration.name !== 'MainProcessSession') return integration;
-    if (replacedSession) return null;
-    replacedSession = true;
-    return eagerMainProcessSession;
+    if (integration.name === 'MainProcessSession') {
+      if (replacedSession) return null;
+      replacedSession = true;
+      return eagerMainProcessSession;
+    }
+    if (integration.name === 'ChildProcess') {
+      if (replacedChildProcess) return null;
+      replacedChildProcess = true;
+      return breadcrumbOnlyChildProcess;
+    }
+    return integration;
   }).filter((integration): integration is T => integration !== null);
   if (!replacedSession) configured.push(eagerMainProcessSession);
+  if (!replacedChildProcess) configured.push(breadcrumbOnlyChildProcess);
   return configured;
 }
 

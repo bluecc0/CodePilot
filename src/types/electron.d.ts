@@ -80,6 +80,14 @@ interface ElectronAPI {
     chrome: string;
     platform: string;
   };
+  serverRecovery?: {
+    /** Available on Main's offline recovery surface only. */
+    copyDiagnostics: () => Promise<boolean>;
+    retry: () => Promise<boolean>;
+    restartApp: () => Promise<boolean>;
+    /** Blocked state only: plain quit, never relaunch (registry is per-Main). */
+    quitApp: () => Promise<boolean>;
+  };
   shell: {
     revealPath: (request: {
       path: string;

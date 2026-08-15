@@ -15,16 +15,23 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 import { buildCodexProviderModelGroup, invalidateCodexModelsCache } from '@/lib/codex/models';
+import { isServerRecoverySafeMode } from '@/lib/server-recovery-safe-mode';
 
 export async function GET(request: NextRequest) {
-  if (request.nextUrl.searchParams.get('refresh') === '1') {
+  const recoverySafeMode = isServerRecoverySafeMode();
+  const force = request.nextUrl.searchParams.get('refresh') === '1';
+  if (force && !recoverySafeMode) {
     invalidateCodexModelsCache();
   }
   try {
-    const group = await buildCodexProviderModelGroup();
-    return NextResponse.json({ group });
+    // Safe mode is a Main-owned process contract. An HTTP query flag must not
+    // escape it and respawn Codex inside the replacement utility process.
+    const group = await buildCodexProviderModelGroup(
+      recoverySafeMode ? { cacheOnly: true } : { force },
+    );
+    return NextResponse.json({ group, recoverySafeMode });
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ group: null, error: reason }, { status: 200 });
+    return NextResponse.json({ group: null, error: reason, recoverySafeMode }, { status: 200 });
   }
 }
